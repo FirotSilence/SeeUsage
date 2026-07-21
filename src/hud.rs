@@ -5,33 +5,34 @@ mod platform {
     use super::{DisplayState, ProviderVisibility};
     use crate::{
         personal::{HudItem, HudItemKind},
-        settings::{self, HudPosition},
+        settings::{self, GlassSettings, HudPosition},
     };
     use std::{
         cell::{Cell, RefCell},
         ffi::c_void,
         mem::size_of,
         ptr::{null, null_mut},
+        time::{Duration, Instant},
     };
     use windows_sys::Win32::{
         Foundation::{COLORREF, GetLastError, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM},
         Graphics::{
             Dwm::{
                 DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_WINDOW_CORNER_PREFERENCE,
-                DWMWCP_DONOTROUND, DwmSetWindowAttribute,
+                DWMWCP_DONOTROUND, DwmFlush, DwmSetWindowAttribute,
             },
             Gdi::{
                 AC_SRC_ALPHA, AC_SRC_OVER, ANTIALIASED_QUALITY, BI_RGB, BITMAPINFO,
-                BITMAPINFOHEADER, BLENDFUNCTION, BeginPaint, CLIP_DEFAULT_PRECIS,
+                BITMAPINFOHEADER, BLENDFUNCTION, BeginPaint, BitBlt, CLIP_DEFAULT_PRECIS,
                 CreateCompatibleDC, CreateDIBSection, CreateFontW, CreatePen, CreateRoundRectRgn,
                 CreateSolidBrush, DEFAULT_CHARSET, DEFAULT_PITCH, DIB_RGB_COLORS, DT_END_ELLIPSIS,
                 DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DeleteDC, DeleteObject,
                 DrawTextW, EndPaint, FF_DONTCARE, FillRgn, GRADIENT_FILL_RECT_V, GRADIENT_RECT,
-                GetDC, GetMonitorInfoW, GradientFill, HDC, HFONT, InvalidateRect, LineTo,
+                GetDC, GetMonitorInfoW, GradientFill, HALFTONE, HDC, HFONT, InvalidateRect, LineTo,
                 MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromRect,
                 MonitorFromWindow, MoveToEx, OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_SOLID, ReleaseDC,
-                RestoreDC, SaveDC, SelectObject, SetBkMode, SetTextColor, SetViewportOrgEx,
-                TRANSPARENT, TRIVERTEX, UpdateWindow,
+                RestoreDC, SRCCOPY, SaveDC, SelectObject, SetBkMode, SetStretchBltMode,
+                SetTextColor, SetViewportOrgEx, StretchBlt, TRANSPARENT, TRIVERTEX, UpdateWindow,
             },
         },
         System::LibraryLoader::GetModuleHandleW,
@@ -41,16 +42,19 @@ mod platform {
             Input::KeyboardAndMouse::{TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT, TrackMouseEvent},
             WindowsAndMessaging::{
                 CREATESTRUCTW, CreateWindowExW, DefWindowProcW, DestroyWindow, GWL_EXSTYLE,
-                GWLP_USERDATA, GetClientRect, GetWindowLongPtrW, GetWindowRect, HTCAPTION,
-                HTCLIENT, HWND_NOTOPMOST, HWND_TOPMOST, IDC_HAND, IDC_SIZEALL, LoadCursorW,
-                MA_NOACTIVATE, RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE,
-                SWP_NOMOVE, SWP_NOSIZE, SetCursor, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-                ULW_ALPHA, UpdateLayeredWindow, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ENTERSIZEMOVE,
-                WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE,
-                WM_NCCREATE, WM_NCDESTROY, WM_NCHITTEST, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE,
-                WM_NCRBUTTONUP, WM_PAINT, WM_PRINTCLIENT, WM_RBUTTONUP, WM_SETCURSOR,
-                WM_SETTINGCHANGE, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-                WS_EX_TOPMOST, WS_POPUP,
+                GWLP_USERDATA, GetClientRect, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect,
+                HTCAPTION, HTCLIENT, HWND_NOTOPMOST, HWND_TOPMOST, IDC_HAND, IDC_SIZEALL,
+                IsWindowVisible, KillTimer, LoadCursorW, MA_NOACTIVATE, RegisterClassW,
+                SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+                SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetCursor,
+                SetTimer, SetWindowDisplayAffinity, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+                ULW_ALPHA, UpdateLayeredWindow, WDA_EXCLUDEFROMCAPTURE, WDA_NONE, WM_DISPLAYCHANGE,
+                WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_LBUTTONUP,
+                WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCCREATE, WM_NCDESTROY, WM_NCHITTEST,
+                WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_NCRBUTTONUP, WM_PAINT, WM_PRINTCLIENT,
+                WM_RBUTTONUP, WM_SETCURSOR, WM_SETTINGCHANGE, WM_TIMER, WM_WINDOWPOSCHANGED,
+                WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+                WS_POPUP,
             },
         },
     };
@@ -69,6 +73,12 @@ mod platform {
     const MARGIN_DIP: i32 = 10;
     const SHADOW_PADDING_DIP: i32 = 8;
     const SURFACE_RADIUS_DIP: i32 = 24;
+    const BACKDROP_MARGIN_DIP: i32 = 20;
+    const BACKDROP_CACHE_TTL: Duration = Duration::from_secs(5);
+    const GLASS_TIMER_ID: usize = 1;
+    const GLASS_TIMER_PERIOD_MS: u32 = 500;
+    const SCENE_SIGNATURE_WIDTH: i32 = 32;
+    const SCENE_SIGNATURE_HEIGHT: i32 = 18;
     const RENDER_SCALE: i32 = 2;
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -91,9 +101,20 @@ mod platform {
         show_minimax: Cell<bool>,
         position: Cell<Option<HudPosition>>,
         pinned: Cell<bool>,
+        glass: Cell<GlassSettings>,
         layout: Cell<PanelLayout>,
         hovered: Cell<bool>,
+        pointer: Cell<Option<(i32, i32)>>,
         dragging: Cell<bool>,
+        rendering_drag_frame: Cell<bool>,
+        capture_excluded: Cell<bool>,
+        last_drag_position: Cell<Option<(i32, i32)>>,
+        drag_motion: Cell<(i32, i32)>,
+        animation_started: Instant,
+        content_generation: Cell<u64>,
+        content: RefCell<Option<CachedContent>>,
+        backdrop: RefCell<Option<CachedBackdrop>>,
+        scene_signature: RefCell<Option<SceneSignature>>,
         items: RefCell<Vec<HudItem>>,
         clock: RefCell<String>,
         show_context_menu: Box<dyn Fn(Option<u64>)>,
@@ -140,6 +161,7 @@ mod platform {
                 show_minimax: Cell::new(visibility.minimax),
                 position: Cell::new(settings::load_hud_position()),
                 pinned: Cell::new(settings::hud_pinned()),
+                glass: Cell::new(settings::glass_settings()),
                 layout: Cell::new(PanelLayout {
                     width: BASE_WIDTH_DIP,
                     height: HEADER_HEIGHT_DIP + 6,
@@ -150,7 +172,17 @@ mod platform {
                     has_disclosure: false,
                 }),
                 hovered: Cell::new(false),
+                pointer: Cell::new(None),
                 dragging: Cell::new(false),
+                rendering_drag_frame: Cell::new(false),
+                capture_excluded: Cell::new(false),
+                last_drag_position: Cell::new(None),
+                drag_motion: Cell::new((0, 0)),
+                animation_started: Instant::now(),
+                content_generation: Cell::new(0),
+                content: RefCell::new(None),
+                backdrop: RefCell::new(None),
+                scene_signature: RefCell::new(None),
                 items: RefCell::new(Vec::new()),
                 clock: RefCell::new(String::new()),
                 show_context_menu: Box::new(show_context_menu),
@@ -180,6 +212,10 @@ mod platform {
             };
             if hwnd.is_null() {
                 return Err(last_error("could not create the desktop meter"));
+            }
+            if unsafe { SetTimer(hwnd, GLASS_TIMER_ID, GLASS_TIMER_PERIOD_MS, None) } == 0 {
+                unsafe { DestroyWindow(hwnd) };
+                return Err(last_error("could not start the glass refresh timer"));
             }
 
             // Per-pixel alpha owns the silhouette, so DWM must not add a second corner treatment.
@@ -221,10 +257,19 @@ mod platform {
         }
 
         pub fn update(&self, display: &DisplayState) {
-            self._state.codex.set(display.codex_remaining);
-            self._state.minimax.set(display.minimax_remaining);
-            self._state.codex_stale.set(display.codex_stale);
-            self._state.minimax_stale.set(display.minimax_stale);
+            let codex_changed =
+                self._state.codex.replace(display.codex_remaining) != display.codex_remaining;
+            let minimax_changed =
+                self._state.minimax.replace(display.minimax_remaining) != display.minimax_remaining;
+            let codex_stale_changed =
+                self._state.codex_stale.replace(display.codex_stale) != display.codex_stale;
+            let minimax_stale_changed =
+                self._state.minimax_stale.replace(display.minimax_stale) != display.minimax_stale;
+            let changed =
+                codex_changed || minimax_changed || codex_stale_changed || minimax_stale_changed;
+            if changed {
+                bump_content_generation(&self._state);
+            }
             if !self._state.dragging.get() {
                 unsafe {
                     InvalidateRect(self.hwnd, null(), 0);
@@ -234,22 +279,33 @@ mod platform {
 
         pub fn update_personal(&self, items: &[HudItem], clock: &str) {
             let previous_count = self._state.items.borrow().len();
-            self._state.items.replace(items.to_vec());
-            self._state.clock.replace(clock.to_string());
+            let changed = self._state.items.borrow().as_slice() != items
+                || self._state.clock.borrow().as_str() != clock;
+            if changed {
+                self._state.items.replace(items.to_vec());
+                self._state.clock.replace(clock.to_string());
+                bump_content_generation(&self._state);
+            }
             let dragging = self._state.dragging.get();
             if should_relayout(previous_count, items.len(), dragging) {
                 let _ = position(self.hwnd, &self._state);
             } else if !dragging {
                 maintain_topmost(self.hwnd, &self._state);
-                unsafe {
-                    InvalidateRect(self.hwnd, null(), 0);
+                if should_repaint_personal(changed, dragging) {
+                    unsafe { InvalidateRect(self.hwnd, null(), 0) };
                 }
             }
         }
 
         pub fn set_provider_visibility(&self, visibility: ProviderVisibility) {
-            self._state.show_codex.set(visibility.codex);
-            self._state.show_minimax.set(visibility.minimax);
+            let codex_changed =
+                self._state.show_codex.replace(visibility.codex) != visibility.codex;
+            let minimax_changed =
+                self._state.show_minimax.replace(visibility.minimax) != visibility.minimax;
+            let changed = codex_changed || minimax_changed;
+            if changed {
+                bump_content_generation(&self._state);
+            }
             if !self._state.dragging.get() {
                 unsafe { InvalidateRect(self.hwnd, null(), 0) };
             }
@@ -291,6 +347,18 @@ mod platform {
             self._state.pinned.set(pinned);
             let _ = position(self.hwnd, &self._state);
         }
+
+        pub fn set_glass_settings(&self, glass: GlassSettings) {
+            let glass = glass.sanitized();
+            let previous = self._state.glass.replace(glass);
+            if previous == glass {
+                return;
+            }
+            if previous.blur != glass.blur {
+                self._state.backdrop.borrow_mut().take();
+            }
+            unsafe { InvalidateRect(self.hwnd, null(), 0) };
+        }
     }
 
     impl Drop for Hud {
@@ -315,19 +383,22 @@ mod platform {
                     unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, state as isize) };
                 }
             }
-            WM_NCDESTROY => {
-                unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) };
-            }
+            WM_NCDESTROY => unsafe {
+                KillTimer(hwnd, GLASS_TIMER_ID);
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+            },
             WM_ERASEBKGND => return 1,
             WM_MOUSEACTIVATE => return MA_NOACTIVATE as LRESULT,
             WM_NCMOUSEMOVE | WM_MOUSEMOVE => {
                 if let Some(state) = window_state(hwnd) {
                     set_hovered(hwnd, state, true);
+                    update_pointer(hwnd, state, message, lparam);
                     track_pointer_leave(hwnd, message == WM_NCMOUSEMOVE);
                 }
             }
             WM_NCMOUSELEAVE | WM_MOUSELEAVE => {
                 if let Some(state) = window_state(hwnd) {
+                    state.pointer.set(None);
                     set_hovered(hwnd, state, false);
                 }
             }
@@ -377,16 +448,34 @@ mod platform {
             }
             WM_ENTERSIZEMOVE => {
                 if let Some(state) = window_state(hwnd) {
-                    state.dragging.set(true);
+                    begin_drag(hwnd, state);
                 }
                 return 0;
             }
+            WM_WINDOWPOSCHANGED => {
+                if let Some(state) = window_state(hwnd)
+                    && should_repaint_window_change(
+                        state.dragging.get(),
+                        state.rendering_drag_frame.get(),
+                    )
+                {
+                    update_drag_motion(hwnd, state);
+                    repaint_drag_frame(hwnd, state);
+                }
+            }
             WM_EXITSIZEMOVE => {
                 if let Some(state) = window_state(hwnd) {
-                    state.dragging.set(false);
+                    end_drag(hwnd, state);
                     remember_position(hwnd, state);
                     position(hwnd, state);
                     persist_position(hwnd, state);
+                    unsafe { UpdateWindow(hwnd) };
+                }
+                return 0;
+            }
+            WM_TIMER if wparam == GLASS_TIMER_ID => {
+                if let Some(state) = window_state(hwnd) {
+                    poll_backdrop(hwnd, state);
                 }
                 return 0;
             }
@@ -429,6 +518,59 @@ mod platform {
     fn window_state(hwnd: HWND) -> Option<&'static HudState> {
         let state = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *const HudState;
         unsafe { state.as_ref() }
+    }
+
+    fn bump_content_generation(state: &HudState) {
+        state
+            .content_generation
+            .set(state.content_generation.get().wrapping_add(1));
+    }
+
+    fn poll_backdrop(hwnd: HWND, state: &HudState) {
+        if state.dragging.get() || unsafe { IsWindowVisible(hwnd) } == 0 {
+            return;
+        }
+
+        let mut client = RECT::default();
+        unsafe { GetClientRect(hwnd, &mut client) };
+        let width = client.right - client.left;
+        let height = client.bottom - client.top;
+        if width <= 0 || height <= 0 {
+            return;
+        }
+        let mut window = RECT::default();
+        if unsafe { GetWindowRect(hwnd, &mut window) } == 0 {
+            return;
+        }
+        let screen = unsafe { GetDC(null_mut()) };
+        if screen.is_null() {
+            return;
+        }
+        let already_excluded = state.capture_excluded.get();
+        let temporary_exclusion = !already_excluded
+            && unsafe { SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) } != 0;
+        if !already_excluded && !temporary_exclusion {
+            unsafe { ReleaseDC(null_mut(), screen) };
+            return;
+        }
+        if temporary_exclusion {
+            unsafe { DwmFlush() };
+        }
+        let signature = capture_scene_signature(screen, screen, window, width, height);
+        if temporary_exclusion {
+            unsafe { SetWindowDisplayAffinity(hwnd, WDA_NONE) };
+        }
+        unsafe { ReleaseDC(null_mut(), screen) };
+        let changed = state
+            .scene_signature
+            .borrow()
+            .as_ref()
+            .is_none_or(|previous| !previous.matches(&signature));
+        if changed {
+            state.scene_signature.replace(Some(signature));
+            state.backdrop.borrow_mut().take();
+            unsafe { InvalidateRect(hwnd, null(), 0) };
+        }
     }
 
     #[derive(Clone, Copy)]
@@ -509,6 +651,92 @@ mod platform {
         }
     }
 
+    fn update_pointer(hwnd: HWND, state: &HudState, message: u32, lparam: LPARAM) {
+        if state.dragging.get() {
+            return;
+        }
+        let (mut x, mut y) = point_from_lparam(lparam);
+        if message == WM_NCMOUSEMOVE {
+            let mut window = RECT::default();
+            if unsafe { GetWindowRect(hwnd, &mut window) } == 0 {
+                return;
+            }
+            x -= window.left;
+            y -= window.top;
+        }
+        let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
+        let threshold = dip(10, dpi).max(1);
+        if state.pointer.get().is_some_and(|(previous_x, previous_y)| {
+            (x - previous_x).abs() < threshold && (y - previous_y).abs() < threshold
+        }) {
+            return;
+        }
+        state.pointer.set(Some((x, y)));
+        unsafe { InvalidateRect(hwnd, null(), 0) };
+    }
+
+    fn begin_drag(hwnd: HWND, state: &HudState) {
+        state.dragging.set(true);
+        state.drag_motion.set((0, 0));
+        let mut window = RECT::default();
+        if unsafe { GetWindowRect(hwnd, &mut window) } != 0 {
+            state
+                .last_drag_position
+                .set(Some((window.left, window.top)));
+        }
+        let excluded = unsafe { SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) } != 0;
+        state.capture_excluded.set(excluded);
+        if excluded {
+            unsafe { DwmFlush() };
+        }
+        repaint_drag_frame(hwnd, state);
+    }
+
+    fn end_drag(hwnd: HWND, state: &HudState) {
+        state.dragging.set(false);
+        state.last_drag_position.set(None);
+        state.drag_motion.set((0, 0));
+        state.backdrop.borrow_mut().take();
+        if state.capture_excluded.replace(false) {
+            unsafe { SetWindowDisplayAffinity(hwnd, WDA_NONE) };
+        }
+    }
+
+    fn update_drag_motion(hwnd: HWND, state: &HudState) {
+        let mut window = RECT::default();
+        if unsafe { GetWindowRect(hwnd, &mut window) } == 0 {
+            return;
+        }
+        let current = (window.left, window.top);
+        let motion = state
+            .last_drag_position
+            .replace(Some(current))
+            .map_or((0, 0), |previous| drag_motion_between(previous, current));
+        state.drag_motion.set(motion);
+    }
+
+    fn drag_motion_between(previous: (i32, i32), current: (i32, i32)) -> (i32, i32) {
+        (
+            (current.0 - previous.0).clamp(-24, 24),
+            (current.1 - previous.1).clamp(-24, 24),
+        )
+    }
+
+    fn should_repaint_window_change(dragging: bool, rendering_drag_frame: bool) -> bool {
+        dragging && !rendering_drag_frame
+    }
+
+    fn repaint_drag_frame(hwnd: HWND, state: &HudState) {
+        if state.rendering_drag_frame.replace(true) {
+            return;
+        }
+        unsafe {
+            InvalidateRect(hwnd, null(), 0);
+            UpdateWindow(hwnd);
+        }
+        state.rendering_drag_frame.set(false);
+    }
+
     fn track_pointer_leave(hwnd: HWND, non_client: bool) {
         let mut tracking = TRACKMOUSEEVENT {
             cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
@@ -523,6 +751,10 @@ mod platform {
 
     fn should_relayout(previous_count: usize, next_count: usize, dragging: bool) -> bool {
         !dragging && previous_count != next_count
+    }
+
+    fn should_repaint_personal(changed: bool, dragging: bool) -> bool {
+        changed && !dragging
     }
 
     fn maintain_topmost(hwnd: HWND, state: &HudState) {
@@ -749,15 +981,46 @@ mod platform {
         })
     }
 
-    fn material_alpha(state: &HudState) -> u8 {
-        let item_count = state.items.borrow().len();
-        let base = match item_count {
-            0 => 154u8,
-            1..=7 => 164,
-            8..=16 => 172,
-            _ => 180,
+    #[derive(Clone, Copy, Debug)]
+    struct GlassStyle {
+        material_alpha: u8,
+        blur_radius: i32,
+        displacement: f32,
+        tint_scale: f32,
+        highlight_scale: f32,
+        motion_scale: f32,
+    }
+
+    fn glass_style(
+        settings: GlassSettings,
+        dpi: u32,
+        hovered: bool,
+        dragging: bool,
+        capture_excluded: bool,
+    ) -> GlassStyle {
+        let settings = settings.sanitized();
+        let base_alpha = if settings.opacity <= 80 {
+            settings.opacity as u16 * 236 / 80
+        } else {
+            236 + (settings.opacity as u16 - 80) * 14 / 20
+        } as u8;
+        let material_alpha = if base_alpha == 0 {
+            0
+        } else if dragging {
+            base_alpha.saturating_sub(if capture_excluded { 6 } else { 66 })
+        } else if hovered {
+            base_alpha.saturating_add(6).min(250)
+        } else {
+            base_alpha
         };
-        base.saturating_add(if state.hovered.get() { 12 } else { 0 })
+        GlassStyle {
+            material_alpha,
+            blur_radius: dipf(settings.blur as f32 * 0.2, dpi).round() as i32,
+            displacement: dipf(settings.refraction as f32 * 0.112, dpi),
+            tint_scale: settings.tint as f32 * 0.02,
+            highlight_scale: settings.highlight as f32 * 0.032,
+            motion_scale: settings.motion as f32 * 0.02,
+        }
     }
 
     fn remember_position(hwnd: HWND, state: &HudState) {
@@ -802,6 +1065,135 @@ mod platform {
         unsafe { EndPaint(hwnd, &paint) };
     }
 
+    struct DibSurface {
+        dc: HDC,
+        bitmap: *mut c_void,
+        previous: *mut c_void,
+        bits: *mut u32,
+        len: usize,
+    }
+
+    impl DibSurface {
+        fn new(reference: HDC, width: i32, height: i32, fill: u32) -> Option<Self> {
+            let dc = unsafe { CreateCompatibleDC(reference) };
+            if dc.is_null() {
+                return None;
+            }
+            let Some((bitmap, bits)) = create_argb_bitmap(reference, width, height) else {
+                unsafe { DeleteDC(dc) };
+                return None;
+            };
+            let previous = unsafe { SelectObject(dc, bitmap) };
+            let len = (width as usize).saturating_mul(height as usize);
+            unsafe { std::slice::from_raw_parts_mut(bits, len) }.fill(fill);
+            Some(Self {
+                dc,
+                bitmap,
+                previous,
+                bits,
+                len,
+            })
+        }
+
+        fn pixels(&self) -> &[u32] {
+            unsafe { std::slice::from_raw_parts(self.bits, self.len) }
+        }
+
+        fn pixels_mut(&mut self) -> &mut [u32] {
+            unsafe { std::slice::from_raw_parts_mut(self.bits, self.len) }
+        }
+    }
+
+    impl Drop for DibSurface {
+        fn drop(&mut self) {
+            unsafe {
+                SelectObject(self.dc, self.previous);
+                DeleteObject(self.bitmap);
+                DeleteDC(self.dc);
+            }
+        }
+    }
+
+    struct Backdrop {
+        pixels: Vec<u32>,
+        blurred: Vec<u32>,
+        width: i32,
+        height: i32,
+        margin: i32,
+    }
+
+    struct CapturedBackdrop {
+        pixels: Vec<u32>,
+        width: i32,
+        height: i32,
+        margin: i32,
+    }
+
+    struct CachedContent {
+        premultiplied: Vec<u32>,
+        alpha: Vec<u8>,
+        source_width: i32,
+        source_height: i32,
+        dpi: u32,
+        generation: u64,
+    }
+
+    impl CachedContent {
+        fn matches(&self, width: i32, height: i32, dpi: u32, generation: u64) -> bool {
+            self.source_width == width
+                && self.source_height == height
+                && self.dpi == dpi
+                && self.generation == generation
+        }
+    }
+
+    struct CachedBackdrop {
+        backdrop: Backdrop,
+        left: i32,
+        top: i32,
+        width: i32,
+        height: i32,
+        dpi: u32,
+        blur_radius: i32,
+        captured_at: Instant,
+    }
+
+    struct SceneSignature {
+        left: i32,
+        top: i32,
+        width: i32,
+        height: i32,
+        pixels: Vec<u32>,
+    }
+
+    impl SceneSignature {
+        fn matches(&self, other: &Self) -> bool {
+            self.left == other.left
+                && self.top == other.top
+                && self.width == other.width
+                && self.height == other.height
+                && self.pixels == other.pixels
+        }
+    }
+
+    impl CachedBackdrop {
+        fn matches(
+            &self,
+            window: RECT,
+            width: i32,
+            height: i32,
+            dpi: u32,
+            blur_radius: i32,
+        ) -> bool {
+            self.left == window.left
+                && self.top == window.top
+                && self.width == width
+                && self.height == height
+                && self.dpi == dpi
+                && self.blur_radius == blur_radius
+        }
+    }
+
     fn render_layered(hwnd: HWND, state: &HudState, reference: HDC) -> bool {
         let mut client = RECT::default();
         unsafe { GetClientRect(hwnd, &mut client) };
@@ -813,117 +1205,171 @@ mod platform {
 
         let source_width = width.saturating_mul(RENDER_SCALE);
         let source_height = height.saturating_mul(RENDER_SCALE);
-        let source_dc = unsafe { CreateCompatibleDC(reference) };
-        if source_dc.is_null() {
+        let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
+        let style = glass_style(
+            state.glass.get(),
+            dpi,
+            state.hovered.get(),
+            state.dragging.get(),
+            state.capture_excluded.get(),
+        );
+        let generation = state.content_generation.get();
+        let needs_content = state
+            .content
+            .borrow()
+            .as_ref()
+            .is_none_or(|cached| !cached.matches(source_width, source_height, dpi, generation));
+        if needs_content {
+            let Some(content_black) = DibSurface::new(reference, source_width, source_height, 0)
+            else {
+                return false;
+            };
+            draw_content_scaled(
+                state,
+                content_black.dc,
+                source_width,
+                source_height,
+                dpi.saturating_mul(RENDER_SCALE as u32),
+            );
+            let Some(content_white) = DibSurface::new(
+                reference,
+                source_width,
+                source_height,
+                pixel_rgb(255, 255, 255),
+            ) else {
+                return false;
+            };
+            draw_content_scaled(
+                state,
+                content_white.dc,
+                source_width,
+                source_height,
+                dpi.saturating_mul(RENDER_SCALE as u32),
+            );
+            let (premultiplied, alpha) = extract_content(
+                content_black.pixels(),
+                content_white.pixels(),
+                source_width,
+                width,
+                height,
+            );
+            state.content.replace(Some(CachedContent {
+                premultiplied,
+                alpha,
+                source_width,
+                source_height,
+                dpi,
+                generation,
+            }));
+        }
+        let Some(mut output) = DibSurface::new(reference, width, height, 0) else {
+            return false;
+        };
+
+        let mut window = RECT::default();
+        if unsafe { GetWindowRect(hwnd, &mut window) } == 0 {
             return false;
         }
-        let Some((source_bitmap, source_bits)) =
-            create_argb_bitmap(reference, source_width, source_height)
-        else {
-            unsafe { DeleteDC(source_dc) };
+        let screen = unsafe { GetDC(null_mut()) };
+        if screen.is_null() {
             return false;
-        };
-        let source_previous = unsafe { SelectObject(source_dc, source_bitmap) };
-        unsafe {
-            std::ptr::write_bytes(
-                source_bits,
-                0,
-                (source_width as usize).saturating_mul(source_height as usize),
-            )
-        };
-        let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
-        draw_scaled(
-            state,
-            source_dc,
-            source_width,
-            source_height,
-            dpi.saturating_mul(RENDER_SCALE as u32),
-        );
-
-        let output_dc = unsafe { CreateCompatibleDC(reference) };
-        let output = if output_dc.is_null() {
-            None
-        } else {
-            create_argb_bitmap(reference, width, height)
-        };
-        let updated = if let Some((output_bitmap, output_bits)) = output {
-            let output_previous = unsafe { SelectObject(output_dc, output_bitmap) };
-            let source = unsafe {
-                std::slice::from_raw_parts(
-                    source_bits,
-                    (source_width as usize).saturating_mul(source_height as usize),
-                )
+        }
+        let now = Instant::now();
+        let needs_backdrop = state.backdrop.borrow().as_ref().is_none_or(|cached| {
+            !cached.matches(window, width, height, dpi, style.blur_radius)
+                || now.duration_since(cached.captured_at) >= BACKDROP_CACHE_TTL
+        });
+        if needs_backdrop {
+            let already_excluded = state.capture_excluded.get();
+            let temporary_exclusion = !already_excluded
+                && unsafe { SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) } != 0;
+            if temporary_exclusion {
+                unsafe { DwmFlush() };
+            }
+            if already_excluded || temporary_exclusion || state.backdrop.borrow().is_none() {
+                let backdrop = capture_backdrop(
+                    reference,
+                    screen,
+                    window,
+                    width,
+                    height,
+                    dpi,
+                    style.blur_radius,
+                    state.dragging.get(),
+                );
+                state.backdrop.replace(Some(CachedBackdrop {
+                    backdrop,
+                    left: window.left,
+                    top: window.top,
+                    width,
+                    height,
+                    dpi,
+                    blur_radius: style.blur_radius,
+                    captured_at: now,
+                }));
+            }
+            if temporary_exclusion {
+                unsafe { SetWindowDisplayAffinity(hwnd, WDA_NONE) };
+            }
+        }
+        {
+            let content = state.content.borrow();
+            let Some(content) = content.as_ref() else {
+                unsafe { ReleaseDC(null_mut(), screen) };
+                return false;
             };
-            let destination = unsafe {
-                std::slice::from_raw_parts_mut(
-                    output_bits,
-                    (width as usize).saturating_mul(height as usize),
-                )
+            let cached = state.backdrop.borrow();
+            let Some(cached) = cached.as_ref() else {
+                unsafe { ReleaseDC(null_mut(), screen) };
+                return false;
             };
             composite_glass(
-                source,
-                source_width,
-                destination,
+                &content.premultiplied,
+                &content.alpha,
+                &cached.backdrop,
+                output.pixels_mut(),
                 width,
                 height,
                 dpi,
-                material_alpha(state),
+                style,
                 state.hovered.get(),
+                state.pointer.get(),
+                (window.left, window.top),
+                state.drag_motion.get(),
+                state.animation_started.elapsed().as_secs_f32() * 0.22 * style.motion_scale,
             );
+        }
 
-            let mut window = RECT::default();
-            unsafe { GetWindowRect(hwnd, &mut window) };
-            let destination_point = POINT {
-                x: window.left,
-                y: window.top,
-            };
-            let source_point = POINT::default();
-            let size = SIZE {
-                cx: width,
-                cy: height,
-            };
-            let blend = BLENDFUNCTION {
-                BlendOp: AC_SRC_OVER as u8,
-                BlendFlags: 0,
-                SourceConstantAlpha: 255,
-                AlphaFormat: AC_SRC_ALPHA as u8,
-            };
-            let screen = unsafe { GetDC(null_mut()) };
-            let result = !screen.is_null()
-                && unsafe {
-                    UpdateLayeredWindow(
-                        hwnd,
-                        screen,
-                        &destination_point,
-                        &size,
-                        output_dc,
-                        &source_point,
-                        0,
-                        &blend,
-                        ULW_ALPHA,
-                    )
-                } != 0;
-            if !screen.is_null() {
-                unsafe { ReleaseDC(null_mut(), screen) };
-            }
-            unsafe {
-                SelectObject(output_dc, output_previous);
-                DeleteObject(output_bitmap);
-            }
-            result
-        } else {
-            false
+        let destination_point = POINT {
+            x: window.left,
+            y: window.top,
         };
-
-        if !output_dc.is_null() {
-            unsafe { DeleteDC(output_dc) };
-        }
-        unsafe {
-            SelectObject(source_dc, source_previous);
-            DeleteObject(source_bitmap);
-            DeleteDC(source_dc);
-        }
-        updated
+        let source_point = POINT::default();
+        let size = SIZE {
+            cx: width,
+            cy: height,
+        };
+        let blend = BLENDFUNCTION {
+            BlendOp: AC_SRC_OVER as u8,
+            BlendFlags: 0,
+            SourceConstantAlpha: 255,
+            AlphaFormat: AC_SRC_ALPHA as u8,
+        };
+        let result = unsafe {
+            UpdateLayeredWindow(
+                hwnd,
+                screen,
+                &destination_point,
+                &size,
+                output.dc,
+                &source_point,
+                0,
+                &blend,
+                ULW_ALPHA,
+            )
+        } != 0;
+        unsafe { ReleaseDC(null_mut(), screen) };
+        result
     }
 
     fn create_argb_bitmap(
@@ -955,16 +1401,308 @@ mod platform {
         (!bitmap.is_null() && !bits.is_null()).then_some((bitmap, bits.cast()))
     }
 
+    fn capture_scene_signature(
+        reference: HDC,
+        screen: HDC,
+        window: RECT,
+        width: i32,
+        height: i32,
+    ) -> SceneSignature {
+        let pixels = DibSurface::new(reference, SCENE_SIGNATURE_WIDTH, SCENE_SIGNATURE_HEIGHT, 0)
+            .map(|surface| {
+                unsafe {
+                    SetStretchBltMode(surface.dc, HALFTONE);
+                    StretchBlt(
+                        surface.dc,
+                        0,
+                        0,
+                        SCENE_SIGNATURE_WIDTH,
+                        SCENE_SIGNATURE_HEIGHT,
+                        screen,
+                        window.left,
+                        window.top,
+                        width,
+                        height,
+                        SRCCOPY,
+                    );
+                }
+                surface.pixels().to_vec()
+            })
+            .unwrap_or_else(|| vec![0; (SCENE_SIGNATURE_WIDTH * SCENE_SIGNATURE_HEIGHT) as usize]);
+        SceneSignature {
+            left: window.left,
+            top: window.top,
+            width,
+            height,
+            pixels,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn capture_backdrop(
+        reference: HDC,
+        screen: HDC,
+        window: RECT,
+        width: i32,
+        height: i32,
+        dpi: u32,
+        blur_radius: i32,
+        fast: bool,
+    ) -> Backdrop {
+        finish_backdrop(
+            capture_backdrop_pixels(reference, screen, window, width, height, dpi),
+            blur_radius,
+            fast,
+        )
+    }
+
+    fn capture_backdrop_pixels(
+        reference: HDC,
+        screen: HDC,
+        window: RECT,
+        width: i32,
+        height: i32,
+        dpi: u32,
+    ) -> CapturedBackdrop {
+        let margin = dip(BACKDROP_MARGIN_DIP, dpi).max(1);
+        let capture_width = width + margin * 2;
+        let capture_height = height + margin * 2;
+        let mut fallback = Vec::with_capacity((capture_width * capture_height) as usize);
+        for y in 0..capture_height {
+            let vertical = y as f32 / capture_height.max(1) as f32;
+            let shade = (32.0 - vertical * 10.0).round() as u8;
+            fallback.extend(std::iter::repeat_n(
+                pixel_rgb(shade, shade.saturating_add(3), shade.saturating_add(7)),
+                capture_width as usize,
+            ));
+        }
+
+        let pixels = if let Some(mut surface) =
+            DibSurface::new(reference, capture_width, capture_height, 0)
+        {
+            surface.pixels_mut().copy_from_slice(&fallback);
+            let virtual_left = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
+            let virtual_top = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
+            let virtual_right = virtual_left + unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) };
+            let virtual_bottom = virtual_top + unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) };
+            let source_left = window.left - margin;
+            let source_top = window.top - margin;
+            let copy_left = source_left.max(virtual_left);
+            let copy_top = source_top.max(virtual_top);
+            let copy_right = (source_left + capture_width).min(virtual_right);
+            let copy_bottom = (source_top + capture_height).min(virtual_bottom);
+            if copy_right > copy_left && copy_bottom > copy_top {
+                unsafe {
+                    BitBlt(
+                        surface.dc,
+                        copy_left - source_left,
+                        copy_top - source_top,
+                        copy_right - copy_left,
+                        copy_bottom - copy_top,
+                        screen,
+                        copy_left,
+                        copy_top,
+                        SRCCOPY,
+                    )
+                };
+            }
+            surface.pixels().to_vec()
+        } else {
+            fallback
+        };
+        CapturedBackdrop {
+            pixels,
+            width: capture_width,
+            height: capture_height,
+            margin,
+        }
+    }
+
+    fn finish_backdrop(captured: CapturedBackdrop, blur_radius: i32, fast: bool) -> Backdrop {
+        let CapturedBackdrop {
+            pixels,
+            width,
+            height,
+            margin,
+        } = captured;
+        let blurred = if fast {
+            box_blur_rgb(&pixels, width, height, blur_radius)
+        } else {
+            blur_rgb(&pixels, width, height, blur_radius)
+        };
+        Backdrop {
+            pixels,
+            blurred,
+            width,
+            height,
+            margin,
+        }
+    }
+
+    fn blur_rgb(pixels: &[u32], width: i32, height: i32, radius: i32) -> Vec<u32> {
+        if radius <= 0 || width <= 0 || height <= 0 {
+            return pixels.to_vec();
+        }
+        let pass_radius = ((radius + 1) / 2).max(1);
+        let first = box_blur_rgb(pixels, width, height, pass_radius);
+        box_blur_rgb(&first, width, height, pass_radius)
+    }
+
+    fn box_blur_rgb(pixels: &[u32], width: i32, height: i32, radius: i32) -> Vec<u32> {
+        if radius <= 0 || width <= 0 || height <= 0 {
+            return pixels.to_vec();
+        }
+        let width = width as usize;
+        let height = height as usize;
+        let radius = radius as usize;
+        let divisor = (radius * 2 + 1) as u64;
+        let mut horizontal = vec![0; pixels.len()];
+        for y in 0..height {
+            let row = y * width;
+            let mut sum = [0u64; 3];
+            for offset in 0..=radius * 2 {
+                add_pixel(
+                    &mut sum,
+                    pixels[row + offset.saturating_sub(radius).min(width - 1)],
+                );
+            }
+            for x in 0..width {
+                horizontal[row + x] = average_pixel(sum, divisor);
+                let leaving = x.saturating_sub(radius);
+                let entering = (x + radius + 1).min(width - 1);
+                subtract_pixel(&mut sum, pixels[row + leaving]);
+                add_pixel(&mut sum, pixels[row + entering]);
+            }
+        }
+
+        let mut output = vec![0; pixels.len()];
+        for x in 0..width {
+            let mut sum = [0u64; 3];
+            for offset in 0..=radius * 2 {
+                let y = offset.saturating_sub(radius).min(height - 1);
+                add_pixel(&mut sum, horizontal[y * width + x]);
+            }
+            for y in 0..height {
+                output[y * width + x] = average_pixel(sum, divisor);
+                let leaving = y.saturating_sub(radius);
+                let entering = (y + radius + 1).min(height - 1);
+                subtract_pixel(&mut sum, horizontal[leaving * width + x]);
+                add_pixel(&mut sum, horizontal[entering * width + x]);
+            }
+        }
+        output
+    }
+
+    fn add_pixel(sum: &mut [u64; 3], pixel: u32) {
+        sum[0] += ((pixel >> 16) & 0xff) as u64;
+        sum[1] += ((pixel >> 8) & 0xff) as u64;
+        sum[2] += (pixel & 0xff) as u64;
+    }
+
+    fn subtract_pixel(sum: &mut [u64; 3], pixel: u32) {
+        sum[0] -= ((pixel >> 16) & 0xff) as u64;
+        sum[1] -= ((pixel >> 8) & 0xff) as u64;
+        sum[2] -= (pixel & 0xff) as u64;
+    }
+
+    fn average_pixel(sum: [u64; 3], divisor: u64) -> u32 {
+        pixel_rgb(
+            (sum[0] / divisor) as u8,
+            (sum[1] / divisor) as u8,
+            (sum[2] / divisor) as u8,
+        )
+    }
+
+    fn sample_rgb(pixels: &[u32], width: i32, height: i32, x: f32, y: f32) -> [f32; 3] {
+        let x = x.clamp(0.0, width.saturating_sub(1) as f32);
+        let y = y.clamp(0.0, height.saturating_sub(1) as f32);
+        let x0 = x.floor() as usize;
+        let y0 = y.floor() as usize;
+        let x1 = (x0 + 1).min(width as usize - 1);
+        let y1 = (y0 + 1).min(height as usize - 1);
+        let tx = x - x0 as f32;
+        let ty = y - y0 as f32;
+        let top_left = unpack_rgb(pixels[y0 * width as usize + x0]);
+        let top_right = unpack_rgb(pixels[y0 * width as usize + x1]);
+        let bottom_left = unpack_rgb(pixels[y1 * width as usize + x0]);
+        let bottom_right = unpack_rgb(pixels[y1 * width as usize + x1]);
+        let mut result = [0.0; 3];
+        for channel in 0..3 {
+            let top = top_left[channel] + (top_right[channel] - top_left[channel]) * tx;
+            let bottom = bottom_left[channel] + (bottom_right[channel] - bottom_left[channel]) * tx;
+            result[channel] = top + (bottom - top) * ty;
+        }
+        result
+    }
+
+    fn unpack_rgb(pixel: u32) -> [f32; 3] {
+        [
+            ((pixel >> 16) & 0xff) as f32,
+            ((pixel >> 8) & 0xff) as f32,
+            (pixel & 0xff) as f32,
+        ]
+    }
+
+    fn extract_content(
+        content_black: &[u32],
+        content_white: &[u32],
+        source_width: i32,
+        width: i32,
+        height: i32,
+    ) -> (Vec<u32>, Vec<u8>) {
+        let scale = RENDER_SCALE as usize;
+        let samples = (scale * scale) as u32;
+        let mut premultiplied = vec![0; (width * height) as usize];
+        let mut alpha = vec![0; premultiplied.len()];
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let mut black = [0u32; 3];
+                let mut white = [0u32; 3];
+                for sample_y in 0..scale {
+                    let row = (y * scale + sample_y) * source_width as usize;
+                    for sample_x in 0..scale {
+                        let index = row + x * scale + sample_x;
+                        let black_pixel = content_black[index];
+                        let white_pixel = content_white[index];
+                        black[0] += (black_pixel >> 16) & 0xff;
+                        black[1] += (black_pixel >> 8) & 0xff;
+                        black[2] += black_pixel & 0xff;
+                        white[0] += (white_pixel >> 16) & 0xff;
+                        white[1] += (white_pixel >> 8) & 0xff;
+                        white[2] += white_pixel & 0xff;
+                    }
+                }
+                let black = black.map(|value| value / samples);
+                let white = white.map(|value| value / samples);
+                let content_alpha = (1.0
+                    - ((white[0] as f32 - black[0] as f32).clamp(0.0, 255.0)
+                        + (white[1] as f32 - black[1] as f32).clamp(0.0, 255.0)
+                        + (white[2] as f32 - black[2] as f32).clamp(0.0, 255.0))
+                        / (255.0 * 3.0))
+                    .clamp(0.0, 1.0);
+                let index = y * width as usize + x;
+                premultiplied[index] = (black[0] << 16) | (black[1] << 8) | black[2];
+                alpha[index] = (content_alpha * 255.0).round() as u8;
+            }
+        }
+        (premultiplied, alpha)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn composite_glass(
-        source: &[u32],
-        source_width: i32,
+        content_premultiplied: &[u32],
+        content_alpha: &[u8],
+        backdrop: &Backdrop,
         destination: &mut [u32],
         width: i32,
         height: i32,
         dpi: u32,
-        material_alpha: u8,
+        style: GlassStyle,
         hovered: bool,
+        pointer: Option<(i32, i32)>,
+        screen_origin: (i32, i32),
+        drag_motion: (i32, i32),
+        animation_phase: f32,
     ) {
         let padding = dip(SHADOW_PADDING_DIP, dpi) as f32;
         let radius = dip(SURFACE_RADIUS_DIP, dpi) as f32;
@@ -974,41 +1712,49 @@ mod platform {
             width as f32 - padding,
             height as f32 - padding,
         );
-        let scale = RENDER_SCALE as usize;
-        let samples = (scale * scale) as u32;
         let shadow_blur = padding.max(1.0);
         let shadow_offset = dip(2, dpi) as f32;
+        let outer_width = dipf(4.0, dpi);
+        let bevel_center = dipf(4.8, dpi);
+        let bevel_width = dipf(2.8, dpi);
+        let inner_center = dipf(8.0, dpi);
+        let inner_width = dipf(5.2, dpi);
+        let lens_width = dipf(18.0, dpi);
+        let logical_scale = 96.0 / dpi as f32;
+        let light_x = -0.54 + animation_phase.sin() * 0.08;
+        let light_y = -0.84 + (animation_phase * 0.73).cos() * 0.05;
+        let light_length = light_x.hypot(light_y).max(f32::EPSILON);
+        let light_x = light_x / light_length;
+        let light_y = light_y / light_length;
+        let wave_x = (0..width)
+            .map(|x| {
+                ((x as f32 + 0.5 + screen_origin.0 as f32) * logical_scale * 0.020
+                    + animation_phase)
+                    .sin()
+            })
+            .collect::<Vec<_>>();
+        let wave_y = (0..height)
+            .map(|y| {
+                ((y as f32 + 0.5 + screen_origin.1 as f32) * logical_scale * 0.017
+                    - animation_phase * 0.7)
+                    .cos()
+            })
+            .collect::<Vec<_>>();
 
-        for y in 0..height as usize {
-            for x in 0..width as usize {
-                let mut blue = 0u32;
-                let mut green = 0u32;
-                let mut red = 0u32;
-                for sample_y in 0..scale {
-                    let row = (y * scale + sample_y) * source_width as usize;
-                    for sample_x in 0..scale {
-                        let pixel = source[row + x * scale + sample_x];
-                        blue += pixel & 0xff;
-                        green += (pixel >> 8) & 0xff;
-                        red += (pixel >> 16) & 0xff;
-                    }
-                }
-                let mut blue = (blue / samples) as f32;
-                let mut green = (green / samples) as f32;
-                let mut red = (red / samples) as f32;
+        for (y, &vertical_wave) in wave_y.iter().enumerate() {
+            for (x, &horizontal_wave) in wave_x.iter().enumerate() {
+                let index = y * width as usize + x;
+                let content_pixel = content_premultiplied[index];
+                let black = [
+                    ((content_pixel >> 16) & 0xff) as f32,
+                    ((content_pixel >> 8) & 0xff) as f32,
+                    (content_pixel & 0xff) as f32,
+                ];
+                let content_alpha = content_alpha[index] as f32 / 255.0;
                 let px = x as f32 + 0.5;
                 let py = y as f32 + 0.5;
                 let distance = rounded_rect_distance(px, py, surface, radius);
                 let coverage = (0.5 - distance).clamp(0.0, 1.0);
-
-                let vertical = ((py - surface.1) / (surface.3 - surface.1)).clamp(0.0, 1.0);
-                let base_red = 42.0 + (20.0 - 42.0) * vertical;
-                let base_green = 47.0 + (24.0 - 47.0) * vertical;
-                let base_blue = 56.0 + (30.0 - 56.0) * vertical;
-                let content_delta = (red - base_red)
-                    .max(green - base_green)
-                    .max(blue - base_blue);
-                let content_strength = ((content_delta - 5.0) / 52.0).clamp(0.0, 1.0);
 
                 let shifted_surface = (
                     surface.0,
@@ -1017,65 +1763,259 @@ mod platform {
                     surface.3 + shadow_offset,
                 );
                 let shadow_distance = rounded_rect_distance(px, py, shifted_surface, radius);
-                let shadow_strength =
-                    (1.0 - shadow_distance.max(0.0) / shadow_blur).clamp(0.0, 1.0);
-                let shadow_alpha = 44.0 * shadow_strength * shadow_strength * (1.0 - coverage);
+                let ambient_shadow = (1.0 - shadow_distance.max(0.0) / shadow_blur).clamp(0.0, 1.0);
+                let contact_shadow =
+                    (1.0 - shadow_distance.max(0.0) / dipf(3.0, dpi).max(1.0)).clamp(0.0, 1.0);
+                let shadow_alpha = (24.0 * ambient_shadow * ambient_shadow
+                    + 18.0 * contact_shadow * contact_shadow * contact_shadow)
+                    * (1.0 - coverage);
 
+                let mut glass = [0.0; 3];
+                let mut glass_alpha = 0.0;
                 if coverage > 0.0 {
                     let edge_depth = (-distance).max(0.0);
-                    let outer_rim = (1.0 - edge_depth / 2.4).clamp(0.0, 1.0);
-                    let inner_rim = (1.0 - (edge_depth - 4.8).abs() / 3.2).clamp(0.0, 1.0);
-                    let horizontal = ((px - surface.0) / (surface.2 - surface.0)).clamp(0.0, 1.0);
-                    let light_direction = (1.0 - horizontal) * 0.35 + (1.0 - vertical) * 0.65;
-                    let top_sheet = (1.0 - (py - surface.1) / 15.0).clamp(0.0, 1.0)
-                        * (0.35 + (1.0 - horizontal) * 0.65);
-                    let top_reflection = (1.0 - ((py - surface.1) - 3.6).abs() / 3.6)
-                        .clamp(0.0, 1.0)
-                        * (1.0 - horizontal * 0.72);
-                    let left_sheet =
-                        (1.0 - (px - surface.0) / 9.0).clamp(0.0, 1.0) * (1.0 - vertical * 0.72);
-                    let refracted_band = (1.0 - (edge_depth - 5.4).abs() / 3.5).clamp(0.0, 1.0)
-                        * (0.35 + light_direction * 0.65);
-                    let lower_right = outer_rim * (horizontal * 0.4 + vertical * 0.6);
-                    let highlight = outer_rim
-                        * (14.0 + light_direction * if hovered { 58.0 } else { 50.0 })
-                        + inner_rim * light_direction * if hovered { 19.0 } else { 15.0 }
-                        + top_sheet * if hovered { 18.0 } else { 13.0 }
-                        + top_reflection * if hovered { 17.0 } else { 13.0 }
-                        + left_sheet * if hovered { 11.0 } else { 8.0 };
-                    let shade = lower_right * 17.0 + refracted_band * (1.0 - light_direction) * 4.0;
-                    let cool_refraction =
-                        outer_rim * (0.4 + light_direction * 0.6) * 5.0 + refracted_band * 4.0;
-                    let warm_refraction = lower_right * 2.5;
-                    let veil = (1.0 - vertical) * 4.5;
-                    blue = (blue + highlight * 1.14 + cool_refraction + veil * 1.2 - shade)
-                        .clamp(0.0, 255.0);
-                    green = (green + highlight * 1.02 + cool_refraction * 0.55 + veil - shade)
-                        .clamp(0.0, 255.0);
-                    red = (red + highlight * 0.92 + warm_refraction + veil * 0.78 - shade)
-                        .clamp(0.0, 255.0);
+                    let outer_rim = smoothstep01(1.0 - edge_depth / outer_width);
+                    let bevel_trough =
+                        smoothstep01(1.0 - (edge_depth - bevel_center).abs() / bevel_width);
+                    let inner_rim =
+                        smoothstep01(1.0 - (edge_depth - inner_center).abs() / inner_width);
+                    let lens = smoothstep01(1.0 - edge_depth / lens_width);
+                    let (normal_x, normal_y) = if lens > 0.001 {
+                        rounded_rect_normal(px, py, surface, radius)
+                    } else {
+                        (0.0, 0.0)
+                    };
+                    let liquid_wave = if lens > 0.001 {
+                        ((horizontal_wave * 0.58 + vertical_wave * 0.42) * style.motion_scale)
+                            .clamp(-1.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    let bend = style.displacement * lens * lens * (1.0 + liquid_wave * 0.08);
+                    let motion_lag_x = drag_motion.0 as f32 * 0.16 * lens * style.motion_scale;
+                    let motion_lag_y = drag_motion.1 as f32 * 0.16 * lens * style.motion_scale;
+                    let sample_x = px + backdrop.margin as f32 - normal_x * bend - motion_lag_x;
+                    let sample_y = py + backdrop.margin as f32 - normal_y * bend - motion_lag_y;
+                    let (blurred, raw) = if lens > 0.001 {
+                        (
+                            sample_rgb(
+                                &backdrop.blurred,
+                                backdrop.width,
+                                backdrop.height,
+                                sample_x,
+                                sample_y,
+                            ),
+                            sample_rgb(
+                                &backdrop.pixels,
+                                backdrop.width,
+                                backdrop.height,
+                                sample_x,
+                                sample_y,
+                            ),
+                        )
+                    } else {
+                        let source_x =
+                            (x as i32 + backdrop.margin).clamp(0, backdrop.width.saturating_sub(1));
+                        let source_y = (y as i32 + backdrop.margin)
+                            .clamp(0, backdrop.height.saturating_sub(1));
+                        let source_index = (source_y * backdrop.width + source_x).max(0) as usize;
+                        (
+                            unpack_rgb(backdrop.blurred[source_index]),
+                            unpack_rgb(backdrop.pixels[source_index]),
+                        )
+                    };
+                    let refraction_scale =
+                        (style.displacement / dipf(11.2, dpi).max(f32::EPSILON)).clamp(0.0, 1.0);
+                    let clarity = (0.10
+                        + liquid_wave * 0.018
+                        + lens * lens * (0.28 + refraction_scale * 0.32))
+                        .clamp(0.06, 0.68);
+                    for channel in 0..3 {
+                        glass[channel] =
+                            blurred[channel] * (1.0 - clarity) + raw[channel] * clarity;
+                    }
+
+                    let mut optical_gradient = 0.0;
+                    if lens > 0.001 {
+                        let chroma_shift = dipf(1.15, dpi) * lens * lens * refraction_scale;
+                        let red_edge = sample_rgb(
+                            &backdrop.pixels,
+                            backdrop.width,
+                            backdrop.height,
+                            sample_x + normal_x * chroma_shift,
+                            sample_y + normal_y * chroma_shift,
+                        );
+                        let blue_edge = sample_rgb(
+                            &backdrop.pixels,
+                            backdrop.width,
+                            backdrop.height,
+                            sample_x - normal_x * chroma_shift,
+                            sample_y - normal_y * chroma_shift,
+                        );
+                        optical_gradient =
+                            ((luminance(red_edge) - luminance(blue_edge)) / 255.0).clamp(-1.0, 1.0);
+                        glass[0] = glass[0] * 0.91 + red_edge[0] * 0.09;
+                        glass[2] = glass[2] * 0.91 + blue_edge[2] * 0.09;
+                    }
+
+                    let scene_luma = luminance(glass);
+                    let neutral = scene_luma;
+                    for channel in &mut glass {
+                        *channel = *channel * 0.92 + neutral * 0.08;
+                    }
+                    let tint =
+                        ((0.17 + scene_luma / 255.0 * 0.13) * style.tint_scale).clamp(0.0, 0.72);
+                    let tint_color = [22.0, 25.0, 30.0];
+                    for channel in 0..3 {
+                        glass[channel] = glass[channel] * (1.0 - tint) + tint_color[channel] * tint;
+                    }
+
+                    let mut edge_alpha = 0.0;
+                    if lens > 0.001 {
+                        let vertical = ((py - surface.1) / (surface.3 - surface.1)).clamp(0.0, 1.0);
+                        let horizontal =
+                            ((px - surface.0) / (surface.2 - surface.0)).clamp(0.0, 1.0);
+                        let normal_light =
+                            (normal_x * light_x + normal_y * light_y).clamp(-1.0, 1.0);
+                        let facing_light = normal_light.max(0.0);
+                        let facing_away = (-normal_light).max(0.0);
+                        let specular = facing_light * facing_light * facing_light;
+                        let upper_film =
+                            inner_rim * (-normal_y).max(0.0) * (0.45 + (1.0 - horizontal) * 0.55);
+                        let raw_detail =
+                            ((luminance(raw) - luminance(blurred)).abs() / 255.0).clamp(0.0, 1.0);
+                        let pointer_glint = pointer.map_or(0.0, |(pointer_x, pointer_y)| {
+                            let distance = (px - pointer_x as f32).hypot(py - pointer_y as f32);
+                            outer_rim
+                                * smoothstep01(1.0 - distance / dipf(150.0, dpi))
+                                * if hovered { 1.0 } else { 0.0 }
+                        });
+                        let pointer_bloom = pointer.map_or(0.0, |(pointer_x, pointer_y)| {
+                            let distance = (px - pointer_x as f32).hypot(py - pointer_y as f32);
+                            smoothstep01(1.0 - distance / dipf(115.0, dpi))
+                                * if hovered { 1.0 } else { 0.0 }
+                        });
+                        let corner_inset = radius * (1.0 - std::f32::consts::FRAC_1_SQRT_2);
+                        let corner_glint_radius = dipf(64.0, dpi);
+                        let top_left_glint = radial_falloff(
+                            px,
+                            py,
+                            surface.0 + corner_inset,
+                            surface.1 + corner_inset,
+                            corner_glint_radius,
+                        );
+                        let bottom_right_glint = radial_falloff(
+                            px,
+                            py,
+                            surface.2 - corner_inset,
+                            surface.3 - corner_inset,
+                            corner_glint_radius,
+                        );
+                        let top_left_fill = 0.24 + (1.0 - specular) * 0.22;
+                        let fixed_corner_glint = outer_rim
+                            * (top_left_glint * top_left_fill + bottom_right_glint * 0.96);
+                        let fixed_corner_bloom =
+                            lens * (top_left_glint * 0.22 + bottom_right_glint * 0.90);
+                        let liquid_light = liquid_wave * (inner_rim * 3.5 + outer_rim * 4.5);
+                        let motion_strength =
+                            (drag_motion.0 as f32).hypot(drag_motion.1 as f32) / 24.0;
+                        let motion_glint =
+                            outer_rim * motion_strength.clamp(0.0, 1.0) * 5.0 * style.motion_scale;
+                        let background_response = 0.65 + (1.0 - scene_luma / 255.0) * 0.45;
+                        let highlight = (outer_rim * (6.0 + specular * 68.0)
+                            + inner_rim * (2.5 + specular * 23.0)
+                            + upper_film * 15.0
+                            + pointer_glint * 36.0
+                            + pointer_bloom * lens * 5.0
+                            + fixed_corner_glint * 40.0
+                            + fixed_corner_bloom * 5.0
+                            + liquid_light
+                            + motion_glint
+                            + raw_detail * outer_rim * 16.0
+                            + optical_gradient.max(0.0) * lens * 27.0)
+                            * background_response
+                            * style.highlight_scale;
+                        let shade = (bevel_trough * (3.0 + facing_away * 16.0)
+                            + optical_gradient.min(0.0).abs() * lens * 18.0
+                            + outer_rim * (horizontal * 0.35 + vertical * 0.65) * 3.5)
+                            * style.highlight_scale;
+                        let raw_luma = luminance(raw);
+                        for channel in 0..3 {
+                            let environmental_spill = (raw[channel] - raw_luma)
+                                * (outer_rim + inner_rim * 0.45)
+                                * 0.10
+                                * style.highlight_scale;
+                            glass[channel] = (glass[channel] + highlight - shade
+                                + environmental_spill)
+                                .clamp(0.0, 255.0);
+                        }
+                        edge_alpha = outer_rim
+                            * (2.0
+                                + specular * 5.0
+                                + fixed_corner_glint * 1.6
+                                + if hovered { pointer_glint * 2.0 } else { 0.0 });
+                    }
+                    if style.material_alpha > 0 {
+                        glass_alpha = ((style.material_alpha as f32 + edge_alpha).min(250.0)
+                            / 255.0)
+                            * coverage;
+                    }
                 }
 
-                let content_alpha =
-                    material_alpha as f32 + (248.0 - material_alpha as f32) * content_strength;
-                let edge_alpha = if distance > -2.4 {
-                    (1.0 - (-distance).max(0.0) / 2.4).clamp(0.0, 1.0)
-                        * if hovered { 46.0 } else { 36.0 }
-                } else {
-                    0.0
-                };
-                let surface_alpha = (content_alpha + edge_alpha).min(252.0) * coverage;
-                let total_alpha = surface_alpha + shadow_alpha * (1.0 - surface_alpha / 255.0);
-                let alpha = total_alpha.round().clamp(0.0, 255.0) as u32;
-                let premultiply = |channel: f32| -> u32 {
-                    (channel * surface_alpha / 255.0).round().clamp(0.0, 255.0) as u32
-                };
-                destination[y * width as usize + x] = (alpha << 24)
-                    | (premultiply(red) << 16)
-                    | (premultiply(green) << 8)
-                    | premultiply(blue);
+                let content_alpha = content_alpha * coverage;
+                let combined_alpha = content_alpha + glass_alpha * (1.0 - content_alpha);
+                let total_alpha = combined_alpha + shadow_alpha / 255.0 * (1.0 - combined_alpha);
+                let mut premultiplied = [0u32; 3];
+                for channel in 0..3 {
+                    let content = black[channel] * coverage;
+                    let glass = glass[channel] * glass_alpha * (1.0 - content_alpha);
+                    premultiplied[channel] = (content + glass).round().clamp(0.0, 255.0) as u32;
+                }
+                destination[index] = ((total_alpha * 255.0).round().clamp(0.0, 255.0) as u32) << 24
+                    | (premultiplied[0] << 16)
+                    | (premultiplied[1] << 8)
+                    | premultiplied[2];
             }
         }
+    }
+
+    fn rounded_rect_normal(
+        x: f32,
+        y: f32,
+        bounds: (f32, f32, f32, f32),
+        radius: f32,
+    ) -> (f32, f32) {
+        let step = 0.75;
+        let dx = rounded_rect_distance(x + step, y, bounds, radius)
+            - rounded_rect_distance(x - step, y, bounds, radius);
+        let dy = rounded_rect_distance(x, y + step, bounds, radius)
+            - rounded_rect_distance(x, y - step, bounds, radius);
+        let length = dx.hypot(dy);
+        if length > 0.0001 {
+            (dx / length, dy / length)
+        } else {
+            (0.0, -1.0)
+        }
+    }
+
+    fn luminance(color: [f32; 3]) -> f32 {
+        color[0] * 0.2126 + color[1] * 0.7152 + color[2] * 0.0722
+    }
+
+    fn smoothstep01(value: f32) -> f32 {
+        let value = value.clamp(0.0, 1.0);
+        value * value * (3.0 - 2.0 * value)
+    }
+
+    fn radial_falloff(x: f32, y: f32, center_x: f32, center_y: f32, radius: f32) -> f32 {
+        let dx = x - center_x;
+        let dy = y - center_y;
+        let radius_squared = radius * radius;
+        smoothstep01(1.0 - (dx * dx + dy * dy) / radius_squared.max(f32::EPSILON))
+    }
+
+    fn pixel_rgb(red: u8, green: u8, blue: u8) -> u32 {
+        ((red as u32) << 16) | ((green as u32) << 8) | blue as u32
     }
 
     fn rounded_rect_distance(x: f32, y: f32, bounds: (f32, f32, f32, f32), radius: f32) -> f32 {
@@ -1115,6 +2055,24 @@ mod platform {
         let saved = unsafe { SaveDC(hdc) };
         unsafe { SetViewportOrgEx(hdc, shadow_padding, shadow_padding, null_mut()) };
         gradient(hdc, &bounds, rgb(42, 47, 56), rgb(20, 24, 30));
+        if saved != 0 {
+            unsafe { RestoreDC(hdc, saved) };
+        }
+        draw_content_scaled(state, hdc, total_width, total_height, dpi);
+    }
+
+    fn draw_content_scaled(
+        state: &HudState,
+        hdc: HDC,
+        total_width: i32,
+        total_height: i32,
+        dpi: u32,
+    ) {
+        let shadow_padding = dip(SHADOW_PADDING_DIP, dpi);
+        let width = (total_width - shadow_padding * 2).max(1);
+        let height = (total_height - shadow_padding * 2).max(1);
+        let saved = unsafe { SaveDC(hdc) };
+        unsafe { SetViewportOrgEx(hdc, shadow_padding, shadow_padding, null_mut()) };
         unsafe { SetBkMode(hdc, TRANSPARENT as i32) };
 
         let header_height = dip(HEADER_HEIGHT_DIP, dpi).min(height);
@@ -1521,6 +2479,10 @@ mod platform {
         (value * dpi as i32 + 48) / 96
     }
 
+    fn dipf(value: f32, dpi: u32) -> f32 {
+        value * dpi as f32 / 96.0
+    }
+
     fn undip(value: i32, dpi: u32) -> i32 {
         (value * 96 + dpi as i32 / 2) / dpi as i32
     }
@@ -1575,27 +2537,174 @@ mod platform {
             let width = 120;
             let height = 72;
             let source_width = width * RENDER_SCALE;
-            let source = vec![rgb(30, 34, 41); (source_width * height * RENDER_SCALE) as usize];
+            let source_len = (source_width * height * RENDER_SCALE) as usize;
+            let content_black = vec![0; source_len];
+            let content_white = vec![pixel_rgb(255, 255, 255); source_len];
+            let (content_premultiplied, content_alpha) =
+                extract_content(&content_black, &content_white, source_width, width, height);
+            let margin = 20;
+            let backdrop_width = width + margin * 2;
+            let backdrop_height = height + margin * 2;
+            let backdrop_pixels =
+                vec![pixel_rgb(88, 118, 148); (backdrop_width * backdrop_height) as usize];
+            let backdrop = Backdrop {
+                blurred: backdrop_pixels.clone(),
+                pixels: backdrop_pixels,
+                width: backdrop_width,
+                height: backdrop_height,
+                margin,
+            };
             let mut destination = vec![0; (width * height) as usize];
 
             composite_glass(
-                &source,
-                source_width,
+                &content_premultiplied,
+                &content_alpha,
+                &backdrop,
                 &mut destination,
                 width,
                 height,
                 96,
-                168,
+                glass_style(GlassSettings::default(), 96, false, false, false),
                 false,
+                None,
+                (0, 0),
+                (0, 0),
+                0.0,
             );
 
-            assert!((destination[(height / 2 * width + width / 2) as usize] >> 24) > 150);
+            assert!((destination[(height / 2 * width + width / 2) as usize] >> 24) > 220);
             assert_eq!(destination[0], 0);
-            let top_rim = destination[(10 * width + width / 2) as usize];
-            let bottom_rim = destination[((height - 10) * width + width / 2) as usize];
+            let top_rim = destination[(12 * width + width / 2) as usize];
+            let top_left_rim = destination[(12 * width + 24) as usize];
+            let bottom_rim = destination[((height - 12) * width + width / 2) as usize];
+            let bottom_right_rim = destination[((height - 12) * width + width - 24) as usize];
             let brightness =
                 |pixel: u32| (pixel & 0xff) + ((pixel >> 8) & 0xff) + ((pixel >> 16) & 0xff);
             assert!(brightness(top_rim) > brightness(bottom_rim));
+            assert!(
+                brightness(top_left_rim) > brightness(top_rim) + 20,
+                "top-left rim brightness {} should exceed top rim brightness {}",
+                brightness(top_left_rim),
+                brightness(top_rim)
+            );
+            assert!(
+                brightness(top_left_rim) < brightness(top_rim) + 40,
+                "top-left rim brightness {} should not overpower top rim brightness {}",
+                brightness(top_left_rim),
+                brightness(top_rim)
+            );
+            assert!(
+                brightness(bottom_right_rim) > brightness(bottom_rim) + 20,
+                "bottom-right rim brightness {} should exceed bottom rim brightness {}",
+                brightness(bottom_right_rim),
+                brightness(bottom_rim)
+            );
+        }
+
+        #[test]
+        fn balanced_glass_defaults_preserve_the_tuned_material() {
+            let style = glass_style(GlassSettings::default(), 96, false, false, false);
+            assert_eq!(style.material_alpha, 236);
+            assert_eq!(style.blur_radius, 10);
+            assert!((style.displacement - 5.6).abs() < 0.001);
+            assert!((style.tint_scale - 1.0).abs() < 0.001);
+            assert!((style.highlight_scale - 1.6).abs() < 0.001);
+            assert!((style.motion_scale - 1.0).abs() < 0.001);
+        }
+
+        #[test]
+        fn static_glass_polls_for_changes_at_a_capped_rate() {
+            assert_eq!(GLASS_TIMER_PERIOD_MS, 500);
+            assert!(BACKDROP_CACHE_TTL > Duration::from_millis(GLASS_TIMER_PERIOD_MS as u64));
+        }
+
+        #[test]
+        fn scene_signature_detects_pixel_and_position_changes() {
+            let baseline = SceneSignature {
+                left: 10,
+                top: 20,
+                width: 300,
+                height: 180,
+                pixels: vec![1, 2, 3],
+            };
+            let same = SceneSignature {
+                left: 10,
+                top: 20,
+                width: 300,
+                height: 180,
+                pixels: vec![1, 2, 3],
+            };
+            let moved = SceneSignature { left: 11, ..same };
+            assert!(baseline.matches(&SceneSignature {
+                left: 10,
+                top: 20,
+                width: 300,
+                height: 180,
+                pixels: vec![1, 2, 3],
+            }));
+            assert!(!baseline.matches(&moved));
+            assert!(!baseline.matches(&SceneSignature {
+                pixels: vec![1, 2, 4],
+                ..baseline
+            }));
+        }
+
+        #[test]
+        fn glass_controls_span_weaker_and_stronger_effects() {
+            let weak = glass_style(
+                GlassSettings {
+                    opacity: 0,
+                    blur: 0,
+                    tint: 0,
+                    refraction: 0,
+                    highlight: 0,
+                    motion: 0,
+                },
+                96,
+                false,
+                false,
+                false,
+            );
+            let strong = glass_style(
+                GlassSettings {
+                    opacity: 100,
+                    blur: 100,
+                    tint: 100,
+                    refraction: 100,
+                    highlight: 100,
+                    motion: 100,
+                },
+                96,
+                false,
+                false,
+                false,
+            );
+            assert!(weak.material_alpha < strong.material_alpha);
+            assert!(weak.blur_radius < strong.blur_radius);
+            assert!(weak.displacement < strong.displacement);
+            assert!(weak.tint_scale < strong.tint_scale);
+            assert!(weak.highlight_scale < strong.highlight_scale);
+            assert!(weak.motion_scale < strong.motion_scale);
+        }
+
+        #[test]
+        fn backdrop_blur_spreads_a_bright_pixel_without_changing_dimensions() {
+            let width = 15;
+            let height = 9;
+            let mut pixels = vec![0; width * height];
+            pixels[height / 2 * width + width / 2] = pixel_rgb(255, 255, 255);
+
+            let blurred = blur_rgb(&pixels, width as i32, height as i32, 4);
+
+            assert_eq!(blurred.len(), pixels.len());
+            assert!(blurred[height / 2 * width + width / 2] < pixel_rgb(255, 255, 255));
+            assert_ne!(blurred[height / 2 * width + width / 2 + 2], 0);
+        }
+
+        #[test]
+        fn zero_backdrop_blur_preserves_the_original_pixels() {
+            let pixels = vec![pixel_rgb(10, 20, 30), pixel_rgb(200, 180, 160)];
+            assert_eq!(blur_rgb(&pixels, 2, 1, 0), pixels);
         }
 
         #[test]
@@ -1635,6 +2744,9 @@ mod platform {
             assert!(!should_relayout(8, 8, false));
             assert!(!should_relayout(8, 9, true));
             assert!(should_relayout(8, 9, false));
+            assert!(!should_repaint_personal(false, false));
+            assert!(!should_repaint_personal(true, true));
+            assert!(should_repaint_personal(true, false));
         }
 
         #[test]
@@ -1642,6 +2754,19 @@ mod platform {
             assert!(should_maintain_topmost(true, false));
             assert!(!should_maintain_topmost(true, true));
             assert!(!should_maintain_topmost(false, false));
+        }
+
+        #[test]
+        fn active_window_drag_repaints_each_completed_move() {
+            assert!(should_repaint_window_change(true, false));
+            assert!(!should_repaint_window_change(false, false));
+            assert!(!should_repaint_window_change(true, true));
+        }
+
+        #[test]
+        fn drag_motion_is_bounded_for_stable_refraction() {
+            assert_eq!(drag_motion_between((100, 100), (108, 94)), (8, -6));
+            assert_eq!(drag_motion_between((100, 100), (180, 20)), (24, -24));
         }
     }
 }

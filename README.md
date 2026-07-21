@@ -16,6 +16,8 @@ webview, database, analytics, or bundled account credentials.
   reminders.
 - Shows quota summaries in the Windows system tray or macOS menu bar.
 - Shows or hides Codex and MiniMax independently from the **Display** menu.
+- Tunes liquid-glass opacity, blur, tint, refraction, highlights, and motion
+  with a live HUD preview.
 - Switches immediately between the system language, English, Simplified or
   Traditional Chinese, Japanese, Korean, Spanish, French, and German.
 - Refreshes every three minutes and on demand.
@@ -29,7 +31,9 @@ take focus, and stays out of the taskbar and `Alt+Tab`. Use **Keep HUD on top**
 in the meter or tray context menu to change the persisted pin state. Drag
 anywhere on the meter to move it; the position is remembered. Right-click the
 meter or tray icon to add and delete notes and reminders, hide the meter, or
-reset its position. The meter grows only as needed, distributes larger
+reset its position. Open **Liquid glass settings...** from the same menu to
+adjust the six persisted material controls or restore their defaults. The
+meter grows only as needed, distributes larger
 collections across columns, and marks an imminent reminder in amber. Notes
 stay above reminders, while reminders are ordered from most urgent to least
 urgent. The meter shows the two most urgent reminders by default; use the
@@ -140,6 +144,11 @@ and never stores tokens or raw provider errors. Its cache contains only
 normalized percentages, reset timestamps, model labels, and safe status codes.
 User-authored notes and reminder labels are stored separately in
 `settings.json`; they are never sent to either provider.
+
+On Windows, the liquid-glass renderer samples only the small desktop area
+directly beneath and around the HUD to blur and refract its backdrop. These
+pixels remain in process memory, are never written to the cache or sent over
+the network, and are discarded when replaced or when SeeUsage exits.
 
 Each provider receives a minimal environment: Codex does not receive MiniMax
 keys, MiniMax does not receive OpenAI keys, and unrelated secrets are removed.
