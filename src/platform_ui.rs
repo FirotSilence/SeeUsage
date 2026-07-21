@@ -1360,14 +1360,6 @@ end run"#;
         Some((text, schedule))
     }
 
-    pub fn prompt_glass_settings(
-        _: settings::GlassSettings,
-        _: isize,
-        _: impl FnMut(settings::GlassSettings),
-    ) -> Option<settings::GlassSettings> {
-        None
-    }
-
     pub fn show_error(message: &str) {
         const SCRIPT: &str = r#"on run argv
 set okLabel to item 2 of argv
@@ -1382,8 +1374,6 @@ end run"#;
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 mod platform {
-    use crate::settings::GlassSettings;
-
     pub fn prompt_text(_: &str, _: &str, _: &str, _: usize) -> Option<String> {
         None
     }
@@ -1401,17 +1391,11 @@ mod platform {
         None
     }
 
-    pub fn prompt_glass_settings(
-        _: GlassSettings,
-        _: isize,
-        _: impl FnMut(GlassSettings),
-    ) -> Option<GlassSettings> {
-        None
-    }
-
     pub fn show_error(message: &str) {
         eprintln!("SeeUsage: {message}");
     }
 }
 
-pub use platform::{prompt_glass_settings, prompt_reminder, prompt_text, show_error};
+#[cfg(target_os = "windows")]
+pub use platform::prompt_glass_settings;
+pub use platform::{prompt_reminder, prompt_text, show_error};
