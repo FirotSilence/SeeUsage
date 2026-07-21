@@ -23,15 +23,15 @@ mod platform {
             Gdi::{
                 AC_SRC_ALPHA, AC_SRC_OVER, ANTIALIASED_QUALITY, BI_RGB, BITMAPINFO,
                 BITMAPINFOHEADER, BLENDFUNCTION, BeginPaint, CLIP_DEFAULT_PRECIS,
-                CreateCompatibleDC, CreateDIBSection, CreateFontW, CreateRoundRectRgn,
+                CreateCompatibleDC, CreateDIBSection, CreateFontW, CreatePen, CreateRoundRectRgn,
                 CreateSolidBrush, DEFAULT_CHARSET, DEFAULT_PITCH, DIB_RGB_COLORS, DT_END_ELLIPSIS,
                 DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DeleteDC, DeleteObject,
                 DrawTextW, EndPaint, FF_DONTCARE, FillRgn, GRADIENT_FILL_RECT_V, GRADIENT_RECT,
-                GetDC, GetMonitorInfoW, GradientFill, HDC, HFONT, InvalidateRect,
+                GetDC, GetMonitorInfoW, GradientFill, HDC, HFONT, InvalidateRect, LineTo,
                 MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromRect,
-                MonitorFromWindow, OUT_DEFAULT_PRECIS, PAINTSTRUCT, ReleaseDC, RestoreDC, SaveDC,
-                SelectObject, SetBkMode, SetTextColor, SetViewportOrgEx, TRANSPARENT, TRIVERTEX,
-                UpdateWindow,
+                MonitorFromWindow, MoveToEx, OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_SOLID, ReleaseDC,
+                RestoreDC, SaveDC, SelectObject, SetBkMode, SetTextColor, SetViewportOrgEx,
+                TRANSPARENT, TRIVERTEX, UpdateWindow,
             },
         },
         System::LibraryLoader::GetModuleHandleW,
@@ -44,8 +44,8 @@ mod platform {
                 GWLP_USERDATA, GetClientRect, GetWindowLongPtrW, GetWindowRect, HTCAPTION,
                 HTCLIENT, HWND_NOTOPMOST, HWND_TOPMOST, IDC_HAND, IDC_SIZEALL, LoadCursorW,
                 MA_NOACTIVATE, RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE,
-                SetCursor, SetWindowLongPtrW, SetWindowPos, ShowWindow, ULW_ALPHA,
-                UpdateLayeredWindow, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ENTERSIZEMOVE,
+                SWP_NOMOVE, SWP_NOSIZE, SetCursor, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+                ULW_ALPHA, UpdateLayeredWindow, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ENTERSIZEMOVE,
                 WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE,
                 WM_NCCREATE, WM_NCDESTROY, WM_NCHITTEST, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE,
                 WM_NCRBUTTONUP, WM_PAINT, WM_PRINTCLIENT, WM_RBUTTONUP, WM_SETCURSOR,
@@ -58,7 +58,8 @@ mod platform {
     const CLASS_NAME: &str = "SeeUsage.DesktopMeter";
     const BASE_WIDTH_DIP: i32 = 332;
     const HEADER_HEIGHT_DIP: i32 = 58;
-    const BOTTOM_PADDING_DIP: i32 = 12;
+    const BOTTOM_PADDING_DIP: i32 = 7;
+    const DISCLOSURE_HEIGHT_DIP: i32 = 12;
     const DEFAULT_ROW_HEIGHT_DIP: i32 = 26;
     const MIN_ROW_HEIGHT_DIP: i32 = 18;
     const COLUMN_WIDTH_DIP: i32 = 220;
@@ -77,6 +78,8 @@ mod platform {
         columns: usize,
         rows: usize,
         row_height: i32,
+        body_items: usize,
+        has_disclosure: bool,
     }
 
     struct HudState {
@@ -95,6 +98,7 @@ mod platform {
         clock: RefCell<String>,
         show_context_menu: Box<dyn Fn(Option<u64>)>,
         acknowledge_reminder: Box<dyn Fn(u64)>,
+        toggle_reminders: Box<dyn Fn()>,
     }
 
     pub struct Hud {
@@ -108,6 +112,7 @@ mod platform {
             visibility: ProviderVisibility,
             show_context_menu: impl Fn(Option<u64>) + 'static,
             acknowledge_reminder: impl Fn(u64) + 'static,
+            toggle_reminders: impl Fn() + 'static,
         ) -> Result<Self, String> {
             let instance = unsafe { GetModuleHandleW(null()) };
             if instance.is_null() {
@@ -141,6 +146,8 @@ mod platform {
                     columns: 1,
                     rows: 0,
                     row_height: DEFAULT_ROW_HEIGHT_DIP,
+                    body_items: 0,
+                    has_disclosure: false,
                 }),
                 hovered: Cell::new(false),
                 dragging: Cell::new(false),
@@ -148,6 +155,7 @@ mod platform {
                 clock: RefCell::new(String::new()),
                 show_context_menu: Box::new(show_context_menu),
                 acknowledge_reminder: Box::new(acknowledge_reminder),
+                toggle_reminders: Box::new(toggle_reminders),
             });
             let title = wide("SeeUsage");
             let extended_style = WS_EX_LAYERED
@@ -232,6 +240,7 @@ mod platform {
             if should_relayout(previous_count, items.len(), dragging) {
                 let _ = position(self.hwnd, &self._state);
             } else if !dragging {
+                maintain_topmost(self.hwnd, &self._state);
                 unsafe {
                     InvalidateRect(self.hwnd, null(), 0);
                 }
@@ -325,10 +334,12 @@ mod platform {
             WM_LBUTTONUP => {
                 if let Some(state) = window_state(hwnd) {
                     let (x, y) = point_from_lparam(lparam);
-                    if let Some(hit) = reminder_at_client_point(hwnd, state, x, y)
-                        && hit.due
-                    {
-                        (state.acknowledge_reminder)(hit.id);
+                    match hud_item_at_client_point(hwnd, state, x, y) {
+                        Some(HudHit::Reminder(hit)) if hit.due => {
+                            (state.acknowledge_reminder)(hit.id);
+                        }
+                        Some(HudHit::ToggleReminders) => (state.toggle_reminders)(),
+                        _ => {}
                     }
                 }
                 return 0;
@@ -336,7 +347,10 @@ mod platform {
             WM_RBUTTONUP => {
                 if let Some(state) = window_state(hwnd) {
                     let (x, y) = point_from_lparam(lparam);
-                    let reminder_id = reminder_at_client_point(hwnd, state, x, y).map(|hit| hit.id);
+                    let reminder_id = match hud_item_at_client_point(hwnd, state, x, y) {
+                        Some(HudHit::Reminder(hit)) => Some(hit.id),
+                        _ => None,
+                    };
                     (state.show_context_menu)(reminder_id);
                 }
                 return 0;
@@ -349,7 +363,7 @@ mod platform {
             }
             WM_NCHITTEST => {
                 if let Some(state) = window_state(hwnd)
-                    && reminder_at_screen_point(hwnd, state, lparam).is_some()
+                    && hud_item_at_screen_point(hwnd, state, lparam).is_some()
                 {
                     return HTCLIENT as LRESULT;
                 }
@@ -423,31 +437,28 @@ mod platform {
         due: bool,
     }
 
+    #[derive(Clone, Copy)]
+    enum HudHit {
+        Reminder(ReminderHit),
+        ToggleReminders,
+    }
+
     fn point_from_lparam(lparam: LPARAM) -> (i32, i32) {
         let x = (lparam as u16) as i16 as i32;
         let y = ((lparam as u32 >> 16) as u16) as i16 as i32;
         (x, y)
     }
 
-    fn reminder_at_screen_point(
-        hwnd: HWND,
-        state: &HudState,
-        lparam: LPARAM,
-    ) -> Option<ReminderHit> {
+    fn hud_item_at_screen_point(hwnd: HWND, state: &HudState, lparam: LPARAM) -> Option<HudHit> {
         let (screen_x, screen_y) = point_from_lparam(lparam);
         let mut window = RECT::default();
         if unsafe { GetWindowRect(hwnd, &mut window) } == 0 {
             return None;
         }
-        reminder_at_client_point(hwnd, state, screen_x - window.left, screen_y - window.top)
+        hud_item_at_client_point(hwnd, state, screen_x - window.left, screen_y - window.top)
     }
 
-    fn reminder_at_client_point(
-        hwnd: HWND,
-        state: &HudState,
-        x: i32,
-        y: i32,
-    ) -> Option<ReminderHit> {
+    fn hud_item_at_client_point(hwnd: HWND, state: &HudState, x: i32, y: i32) -> Option<HudHit> {
         let mut client = RECT::default();
         if unsafe { GetClientRect(hwnd, &mut client) } == 0 {
             return None;
@@ -469,13 +480,23 @@ mod platform {
             .iter()
             .enumerate()
             .find_map(|(index, item)| {
-                let id = item.reminder_id?;
                 let bounds = item_bounds(layout, index, width, height, dpi)?;
-                (surface_x >= bounds.left
+                if !(surface_x >= bounds.left
                     && surface_x < bounds.right
                     && surface_y >= bounds.top
                     && surface_y < bounds.bottom)
-                    .then_some(ReminderHit { id, due: item.due })
+                {
+                    return None;
+                }
+                match item.kind {
+                    HudItemKind::Reminder => item
+                        .reminder_id
+                        .map(|id| HudHit::Reminder(ReminderHit { id, due: item.due })),
+                    HudItemKind::ReminderExpand | HudItemKind::ReminderCollapse => {
+                        Some(HudHit::ToggleReminders)
+                    }
+                    HudItemKind::Note => None,
+                }
             })
     }
 
@@ -502,6 +523,26 @@ mod platform {
 
     fn should_relayout(previous_count: usize, next_count: usize, dragging: bool) -> bool {
         !dragging && previous_count != next_count
+    }
+
+    fn maintain_topmost(hwnd: HWND, state: &HudState) {
+        if should_maintain_topmost(state.pinned.get(), state.dragging.get()) {
+            unsafe {
+                SetWindowPos(
+                    hwnd,
+                    HWND_TOPMOST,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                );
+            }
+        }
+    }
+
+    fn should_maintain_topmost(pinned: bool, dragging: bool) -> bool {
+        pinned && !dragging
     }
 
     fn position(hwnd: HWND, state: &HudState) -> bool {
@@ -535,8 +576,22 @@ mod platform {
 
         let work_width = undip(monitor_info.rcWork.right - monitor_info.rcWork.left, dpi);
         let work_height = undip(monitor_info.rcWork.bottom - monitor_info.rcWork.top, dpi);
+        let (body_items, has_disclosure) = {
+            let items = state.items.borrow();
+            let has_disclosure = items.last().is_some_and(|item| {
+                matches!(
+                    item.kind,
+                    HudItemKind::ReminderExpand | HudItemKind::ReminderCollapse
+                )
+            });
+            (
+                items.len().saturating_sub(usize::from(has_disclosure)),
+                has_disclosure,
+            )
+        };
         let layout = panel_layout(
-            state.items.borrow().len(),
+            body_items,
+            has_disclosure,
             work_width - SHADOW_PADDING_DIP * 2,
             work_height - SHADOW_PADDING_DIP * 2,
         );
@@ -577,16 +632,28 @@ mod platform {
         true
     }
 
-    fn panel_layout(item_count: usize, work_width: i32, work_height: i32) -> PanelLayout {
+    fn panel_layout(
+        item_count: usize,
+        has_disclosure: bool,
+        work_width: i32,
+        work_height: i32,
+    ) -> PanelLayout {
         let available_width = (work_width - MARGIN_DIP * 2).max(1);
         let available_height = (work_height - MARGIN_DIP * 2).max(1);
+        let disclosure_height = if has_disclosure {
+            DISCLOSURE_HEIGHT_DIP
+        } else {
+            0
+        };
         if item_count == 0 {
             return PanelLayout {
                 width: BASE_WIDTH_DIP.min(available_width),
-                height: (HEADER_HEIGHT_DIP + 6).min(available_height),
+                height: (HEADER_HEIGHT_DIP + disclosure_height + 6).min(available_height),
                 columns: 1,
                 rows: 0,
                 row_height: DEFAULT_ROW_HEIGHT_DIP,
+                body_items: 0,
+                has_disclosure,
             };
         }
 
@@ -599,9 +666,10 @@ mod platform {
         let max_columns = ((available_width - CONTENT_PADDING_DIP * 2 + COLUMN_GAP_DIP)
             / (MIN_COLUMN_WIDTH_DIP + COLUMN_GAP_DIP))
             .max(1) as usize;
-        let max_rows = ((available_height - HEADER_HEIGHT_DIP - BOTTOM_PADDING_DIP)
-            / MIN_ROW_HEIGHT_DIP)
-            .max(1) as usize;
+        let max_rows =
+            ((available_height - HEADER_HEIGHT_DIP - BOTTOM_PADDING_DIP - disclosure_height)
+                / MIN_ROW_HEIGHT_DIP)
+                .max(1) as usize;
         let required_columns = item_count.div_ceil(max_rows);
         let columns = preferred_columns
             .max(required_columns)
@@ -609,9 +677,10 @@ mod platform {
             .min(item_count)
             .max(1);
         let rows = item_count.div_ceil(columns);
-        let row_height = ((available_height - HEADER_HEIGHT_DIP - BOTTOM_PADDING_DIP)
-            / rows as i32)
-            .clamp(MIN_ROW_HEIGHT_DIP, DEFAULT_ROW_HEIGHT_DIP);
+        let row_height =
+            ((available_height - HEADER_HEIGHT_DIP - BOTTOM_PADDING_DIP - disclosure_height)
+                / rows as i32)
+                .clamp(MIN_ROW_HEIGHT_DIP, DEFAULT_ROW_HEIGHT_DIP);
         let desired_width = CONTENT_PADDING_DIP * 2
             + columns as i32 * COLUMN_WIDTH_DIP
             + (columns.saturating_sub(1)) as i32 * COLUMN_GAP_DIP;
@@ -619,9 +688,10 @@ mod platform {
             .max(BASE_WIDTH_DIP)
             .min(available_width)
             .max(1);
-        let height = (HEADER_HEIGHT_DIP + rows as i32 * row_height + BOTTOM_PADDING_DIP)
-            .min(available_height)
-            .max(1);
+        let height =
+            (HEADER_HEIGHT_DIP + rows as i32 * row_height + disclosure_height + BOTTOM_PADDING_DIP)
+                .min(available_height)
+                .max(1);
 
         PanelLayout {
             width,
@@ -629,6 +699,8 @@ mod platform {
             columns,
             rows,
             row_height,
+            body_items: item_count,
+            has_disclosure,
         }
     }
 
@@ -639,7 +711,23 @@ mod platform {
         height: i32,
         dpi: u32,
     ) -> Option<RECT> {
-        if layout.rows == 0 || index >= layout.rows.saturating_mul(layout.columns) {
+        let content_left = dip(CONTENT_PADDING_DIP, dpi);
+        let content_right = width - content_left;
+        if layout.has_disclosure && index == layout.body_items {
+            let top = dip(
+                HEADER_HEIGHT_DIP + layout.rows as i32 * layout.row_height,
+                dpi,
+            )
+            .min(height - dip(BOTTOM_PADDING_DIP, dpi));
+            return Some(RECT {
+                left: content_left,
+                top,
+                right: content_right,
+                bottom: (top + dip(DISCLOSURE_HEIGHT_DIP, dpi))
+                    .min(height - dip(BOTTOM_PADDING_DIP, dpi)),
+            });
+        }
+        if layout.rows == 0 || index >= layout.body_items {
             return None;
         }
         let column = index / layout.rows;
@@ -647,8 +735,6 @@ mod platform {
         if column >= layout.columns {
             return None;
         }
-        let content_left = dip(CONTENT_PADDING_DIP, dpi);
-        let content_right = width - content_left;
         let column_gap = dip(COLUMN_GAP_DIP, dpi);
         let total_gap = layout.columns.saturating_sub(1) as i32 * column_gap;
         let column_width = (content_right - content_left - total_gap) / layout.columns as i32;
@@ -666,12 +752,12 @@ mod platform {
     fn material_alpha(state: &HudState) -> u8 {
         let item_count = state.items.borrow().len();
         let base = match item_count {
-            0 => 168u8,
-            1..=7 => 184,
-            8..=16 => 192,
-            _ => 200,
+            0 => 154u8,
+            1..=7 => 164,
+            8..=16 => 172,
+            _ => 180,
         };
-        base.saturating_add(if state.hovered.get() { 8 } else { 0 })
+        base.saturating_add(if state.hovered.get() { 12 } else { 0 })
     }
 
     fn remember_position(hwnd: HWND, state: &HudState) {
@@ -916,9 +1002,9 @@ mod platform {
                 let coverage = (0.5 - distance).clamp(0.0, 1.0);
 
                 let vertical = ((py - surface.1) / (surface.3 - surface.1)).clamp(0.0, 1.0);
-                let base_red = 35.0 + (22.0 - 35.0) * vertical;
-                let base_green = 39.0 + (25.0 - 39.0) * vertical;
-                let base_blue = 47.0 + (31.0 - 47.0) * vertical;
+                let base_red = 42.0 + (20.0 - 42.0) * vertical;
+                let base_green = 47.0 + (24.0 - 47.0) * vertical;
+                let base_blue = 56.0 + (30.0 - 56.0) * vertical;
                 let content_delta = (red - base_red)
                     .max(green - base_green)
                     .max(blue - base_blue);
@@ -933,32 +1019,48 @@ mod platform {
                 let shadow_distance = rounded_rect_distance(px, py, shifted_surface, radius);
                 let shadow_strength =
                     (1.0 - shadow_distance.max(0.0) / shadow_blur).clamp(0.0, 1.0);
-                let shadow_alpha = 40.0 * shadow_strength * shadow_strength * (1.0 - coverage);
+                let shadow_alpha = 44.0 * shadow_strength * shadow_strength * (1.0 - coverage);
 
                 if coverage > 0.0 {
                     let edge_depth = (-distance).max(0.0);
                     let outer_rim = (1.0 - edge_depth / 2.4).clamp(0.0, 1.0);
-                    let inner_rim = (1.0 - (edge_depth - 3.8).abs() / 2.8).clamp(0.0, 1.0);
+                    let inner_rim = (1.0 - (edge_depth - 4.8).abs() / 3.2).clamp(0.0, 1.0);
                     let horizontal = ((px - surface.0) / (surface.2 - surface.0)).clamp(0.0, 1.0);
                     let light_direction = (1.0 - horizontal) * 0.35 + (1.0 - vertical) * 0.65;
-                    let top_sheet = (1.0 - (py - surface.1) / 9.0).clamp(0.0, 1.0)
-                        * (0.3 + (1.0 - horizontal) * 0.7);
+                    let top_sheet = (1.0 - (py - surface.1) / 15.0).clamp(0.0, 1.0)
+                        * (0.35 + (1.0 - horizontal) * 0.65);
+                    let top_reflection = (1.0 - ((py - surface.1) - 3.6).abs() / 3.6)
+                        .clamp(0.0, 1.0)
+                        * (1.0 - horizontal * 0.72);
+                    let left_sheet =
+                        (1.0 - (px - surface.0) / 9.0).clamp(0.0, 1.0) * (1.0 - vertical * 0.72);
+                    let refracted_band = (1.0 - (edge_depth - 5.4).abs() / 3.5).clamp(0.0, 1.0)
+                        * (0.35 + light_direction * 0.65);
+                    let lower_right = outer_rim * (horizontal * 0.4 + vertical * 0.6);
                     let highlight = outer_rim
-                        * (10.0 + light_direction * if hovered { 48.0 } else { 40.0 })
-                        + inner_rim * light_direction * if hovered { 15.0 } else { 11.0 }
-                        + top_sheet * if hovered { 13.0 } else { 9.0 };
-                    let shade = outer_rim * (horizontal * 0.3 + vertical * 0.7) * 12.0;
-                    let veil = (1.0 - vertical) * 3.5;
-                    blue = (blue + highlight * 1.1 + veil * 1.18 - shade).clamp(0.0, 255.0);
-                    green = (green + highlight + veil - shade).clamp(0.0, 255.0);
-                    red = (red + highlight * 0.92 + veil * 0.82 - shade).clamp(0.0, 255.0);
+                        * (14.0 + light_direction * if hovered { 58.0 } else { 50.0 })
+                        + inner_rim * light_direction * if hovered { 19.0 } else { 15.0 }
+                        + top_sheet * if hovered { 18.0 } else { 13.0 }
+                        + top_reflection * if hovered { 17.0 } else { 13.0 }
+                        + left_sheet * if hovered { 11.0 } else { 8.0 };
+                    let shade = lower_right * 17.0 + refracted_band * (1.0 - light_direction) * 4.0;
+                    let cool_refraction =
+                        outer_rim * (0.4 + light_direction * 0.6) * 5.0 + refracted_band * 4.0;
+                    let warm_refraction = lower_right * 2.5;
+                    let veil = (1.0 - vertical) * 4.5;
+                    blue = (blue + highlight * 1.14 + cool_refraction + veil * 1.2 - shade)
+                        .clamp(0.0, 255.0);
+                    green = (green + highlight * 1.02 + cool_refraction * 0.55 + veil - shade)
+                        .clamp(0.0, 255.0);
+                    red = (red + highlight * 0.92 + warm_refraction + veil * 0.78 - shade)
+                        .clamp(0.0, 255.0);
                 }
 
                 let content_alpha =
                     material_alpha as f32 + (248.0 - material_alpha as f32) * content_strength;
                 let edge_alpha = if distance > -2.4 {
                     (1.0 - (-distance).max(0.0) / 2.4).clamp(0.0, 1.0)
-                        * if hovered { 28.0 } else { 22.0 }
+                        * if hovered { 46.0 } else { 36.0 }
                 } else {
                     0.0
                 };
@@ -1012,7 +1114,7 @@ mod platform {
         };
         let saved = unsafe { SaveDC(hdc) };
         unsafe { SetViewportOrgEx(hdc, shadow_padding, shadow_padding, null_mut()) };
-        gradient(hdc, &bounds, rgb(35, 39, 47), rgb(22, 25, 31));
+        gradient(hdc, &bounds, rgb(42, 47, 56), rgb(20, 24, 30));
         unsafe { SetBkMode(hdc, TRANSPARENT as i32) };
 
         let header_height = dip(HEADER_HEIGHT_DIP, dpi).min(height);
@@ -1096,6 +1198,19 @@ mod platform {
                 let Some(row_bounds) = item_bounds(layout, index, width, height, dpi) else {
                     continue;
                 };
+                if matches!(
+                    item.kind,
+                    HudItemKind::ReminderExpand | HudItemKind::ReminderCollapse
+                ) {
+                    draw_chevron(
+                        hdc,
+                        &row_bounds,
+                        item.kind == HudItemKind::ReminderCollapse,
+                        rgb(238, 244, 247),
+                        dpi,
+                    );
+                    continue;
+                }
                 if item.due {
                     fill_round_rect(
                         hdc,
@@ -1248,6 +1363,30 @@ mod platform {
     fn fill_capsule(hdc: HDC, bounds: &RECT, color: COLORREF) {
         let diameter = (bounds.right - bounds.left).min(bounds.bottom - bounds.top);
         fill_round_rect(hdc, bounds, (diameter + 1) / 2, color);
+    }
+
+    fn draw_chevron(hdc: HDC, bounds: &RECT, points_up: bool, color: COLORREF, dpi: u32) {
+        let center_x = (bounds.left + bounds.right) / 2;
+        let center_y = (bounds.top + bounds.bottom) / 2;
+        let half_width = dip(5, dpi);
+        let half_height = dip(2, dpi);
+        let (edge_y, point_y) = if points_up {
+            (center_y + half_height, center_y - half_height)
+        } else {
+            (center_y - half_height, center_y + half_height)
+        };
+        let pen = unsafe { CreatePen(PS_SOLID, dip(1, dpi).max(1), color) };
+        if pen.is_null() {
+            return;
+        }
+        let previous = unsafe { SelectObject(hdc, pen) };
+        unsafe {
+            MoveToEx(hdc, center_x - half_width, edge_y, null_mut());
+            LineTo(hdc, center_x, point_y);
+            LineTo(hdc, center_x + half_width, edge_y);
+            SelectObject(hdc, previous);
+            DeleteObject(pen);
+        }
     }
 
     fn fill_round_rect(hdc: HDC, bounds: &RECT, radius: i32, color: COLORREF) {
@@ -1452,12 +1591,17 @@ mod platform {
 
             assert!((destination[(height / 2 * width + width / 2) as usize] >> 24) > 150);
             assert_eq!(destination[0], 0);
+            let top_rim = destination[(10 * width + width / 2) as usize];
+            let bottom_rim = destination[((height - 10) * width + width / 2) as usize];
+            let brightness =
+                |pixel: u32| (pixel & 0xff) + ((pixel >> 8) & 0xff) + ((pixel >> 16) & 0xff);
+            assert!(brightness(top_rim) > brightness(bottom_rim));
         }
 
         #[test]
         fn every_item_receives_a_visible_layout_slot() {
             for count in [1, 3, 12, 24, 56] {
-                let layout = panel_layout(count, 800, 480);
+                let layout = panel_layout(count, false, 800, 480);
                 assert!(layout.rows * layout.columns >= count);
                 assert!(layout.width <= 780);
                 assert!(layout.height <= 460);
@@ -1465,10 +1609,39 @@ mod platform {
         }
 
         #[test]
+        fn reminder_disclosure_uses_a_compact_full_width_footer() {
+            let without_disclosure = panel_layout(2, false, 800, 480);
+            let with_disclosure = panel_layout(2, true, 800, 480);
+            assert_eq!(
+                with_disclosure.height - without_disclosure.height,
+                DISCLOSURE_HEIGHT_DIP
+            );
+
+            let bounds = item_bounds(
+                with_disclosure,
+                2,
+                with_disclosure.width,
+                with_disclosure.height,
+                96,
+            )
+            .expect("disclosure footer");
+            assert_eq!(bounds.left, CONTENT_PADDING_DIP);
+            assert_eq!(bounds.right, with_disclosure.width - CONTENT_PADDING_DIP);
+            assert_eq!(bounds.bottom - bounds.top, DISCLOSURE_HEIGHT_DIP);
+        }
+
+        #[test]
         fn personal_ticks_never_reposition_an_active_drag() {
             assert!(!should_relayout(8, 8, false));
             assert!(!should_relayout(8, 9, true));
             assert!(should_relayout(8, 9, false));
+        }
+
+        #[test]
+        fn topmost_maintenance_respects_pin_and_drag_state() {
+            assert!(should_maintain_topmost(true, false));
+            assert!(!should_maintain_topmost(true, true));
+            assert!(!should_maintain_topmost(false, false));
         }
     }
 }
@@ -1486,6 +1659,7 @@ mod platform {
             _: ProviderVisibility,
             _: impl Fn(Option<u64>) + 'static,
             _: impl Fn(u64) + 'static,
+            _: impl Fn() + 'static,
         ) -> Result<Self, String> {
             Err("the desktop meter is only available on Windows".into())
         }

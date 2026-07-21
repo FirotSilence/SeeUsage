@@ -38,6 +38,7 @@
   "solar_date": "Fecha solar",
   "lunar_date": "Fecha lunar",
   "show_distant": "Mostrar recordatorios posteriores a 2 días",
+  "update_interval_anchor_on_click": "Actualizar el anclaje del intervalo al hacer clic",
   "no_reminders": "Sin recordatorios",
   "mark_complete": "Marcar la próxima aparición como completada",
   "delete_reminder": "Eliminar recordatorio",

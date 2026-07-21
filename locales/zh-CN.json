@@ -38,6 +38,7 @@
   "solar_date": "阳历固定日",
   "lunar_date": "农历固定日",
   "show_distant": "显示两天后的提醒",
+  "update_interval_anchor_on_click": "点击时更新周期锚点",
   "no_reminders": "暂无提醒",
   "mark_complete": "标记下次已完成",
   "delete_reminder": "删除提醒",

@@ -38,6 +38,7 @@
   "solar_date": "Solares Datum",
   "lunar_date": "Lunares Datum",
   "show_distant": "Erinnerungen nach mehr als 2 Tagen anzeigen",
+  "update_interval_anchor_on_click": "Intervallanker beim Klicken aktualisieren",
   "no_reminders": "Keine Erinnerungen",
   "mark_complete": "Nächstes Vorkommen als erledigt markieren",
   "delete_reminder": "Erinnerung löschen",

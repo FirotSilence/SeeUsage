@@ -134,6 +134,8 @@ pub mod key {
     pub const SOLAR_DATE: &str = "solar_date";
     pub const LUNAR_DATE: &str = "lunar_date";
     pub const SHOW_DISTANT: &str = "show_distant";
+    #[cfg(target_os = "windows")]
+    pub const UPDATE_INTERVAL_ANCHOR_ON_CLICK: &str = "update_interval_anchor_on_click";
     pub const NO_REMINDERS: &str = "no_reminders";
     pub const MARK_COMPLETE: &str = "mark_complete";
     pub const DELETE_REMINDER: &str = "delete_reminder";

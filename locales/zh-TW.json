@@ -38,6 +38,7 @@
   "solar_date": "國曆固定日",
   "lunar_date": "農曆固定日",
   "show_distant": "顯示兩天後的提醒",
+  "update_interval_anchor_on_click": "點擊時更新週期錨點",
   "no_reminders": "沒有提醒",
   "mark_complete": "將下次標記為完成",
   "delete_reminder": "刪除提醒",
