@@ -38,6 +38,7 @@
   "solar_date": "양력 고정일",
   "lunar_date": "음력 고정일",
   "show_distant": "2일 이후 알림 표시",
+  "update_interval_anchor_on_click": "클릭할 때 반복 기준 시각 업데이트",
   "no_reminders": "알림 없음",
   "mark_complete": "다음 항목 완료로 표시",
   "delete_reminder": "알림 삭제",

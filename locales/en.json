@@ -38,6 +38,7 @@
   "solar_date": "Solar date",
   "lunar_date": "Lunar date",
   "show_distant": "Show reminders beyond 2 days",
+  "update_interval_anchor_on_click": "Update interval anchor when clicked",
   "no_reminders": "No reminders",
   "mark_complete": "Mark next occurrence complete",
   "delete_reminder": "Delete reminder",

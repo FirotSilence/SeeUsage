@@ -32,7 +32,7 @@ impl Default for ProviderVisibility {
     fn default() -> Self {
         Self {
             codex: true,
-            minimax: true,
+            minimax: false,
         }
     }
 }

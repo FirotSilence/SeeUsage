@@ -38,6 +38,7 @@
   "solar_date": "新暦の固定日",
   "lunar_date": "旧暦の固定日",
   "show_distant": "2 日より先のリマインダーを表示",
+  "update_interval_anchor_on_click": "クリック時に間隔の起点を更新",
   "no_reminders": "リマインダーはありません",
   "mark_complete": "次回を完了としてマーク",
   "delete_reminder": "リマインダーを削除",

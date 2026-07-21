@@ -32,7 +32,8 @@ meter or tray icon to add and delete notes and reminders, hide the meter, or
 reset its position. The meter grows only as needed, distributes larger
 collections across columns, and marks an imminent reminder in amber. Notes
 stay above reminders, while reminders are ordered from most urgent to least
-urgent.
+urgent. The meter shows the two most urgent reminders by default; use the
+disclosure arrow below them to expand or collapse the remaining reminders.
 Reminders more than two days away are hidden from the meter by default; toggle
 **Show reminders beyond 2 days** in the right-click reminder menu to show them.
 
@@ -46,7 +47,10 @@ on the Windows meter to acknowledge it, or right-click it and choose **Mark
 next occurrence complete** to skip the next occurrence. The same completion
 action is available in the tray or menu-bar reminder menu. Overdue reminders
 remain pending after a restart; recurring reminders advance only when completed
-and keep their interval cadence without drift.
+and keep their interval cadence without drift. Right-click an individual
+fixed-interval reminder and toggle **Update interval anchor when clicked** below
+the completion action to schedule its next occurrence from the confirmation
+time. Calendar and clock-based schedules never show or use this option.
 
 ## Requirements
 
@@ -107,7 +111,8 @@ there to switch the entire interface without restarting; the selection is
 stored locally in `settings.json`. The **Display** submenu independently hides
 Codex or MiniMax from the HUD, native menu, tooltip, title, and quota warning
 color. This changes presentation only; background refreshes continue for both
-providers. These environment variables cover portable and development
+providers. Codex is visible by default and MiniMax is hidden by default. These
+environment variables cover portable and development
 installations:
 
 | Variable | Purpose |

@@ -31,6 +31,7 @@ enum UserEvent {
     Menu(MenuEvent),
     HudContextMenu(Option<u64>),
     ReminderAcknowledged(u64),
+    ReminderExpansionToggled,
     RefreshStarted,
     SnapshotUpdated(AppSnapshot),
 }
@@ -85,6 +86,7 @@ pub fn run_tray() -> Result<(), String> {
     let mut current_snapshot = cached.clone();
     let mut personal = settings::load_personal_items();
     let mut show_distant_reminders = settings::show_distant_reminders();
+    let mut reminders_expanded = false;
     let mut provider_visibility = settings::provider_visibility();
     let mut language = settings::language();
     let mut event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
@@ -118,6 +120,12 @@ pub fn run_tray() -> Result<(), String> {
                 let _ = proxy.send_event(UserEvent::ReminderAcknowledged(reminder_id));
             }
         },
+        {
+            let proxy = proxy.clone();
+            move || {
+                let _ = proxy.send_event(UserEvent::ReminderExpansionToggled);
+            }
+        },
     )
     .ok();
     update_hud_personal(
@@ -125,6 +133,7 @@ pub fn run_tray() -> Result<(), String> {
         &personal,
         model::unix_timestamp(),
         show_distant_reminders,
+        reminders_expanded,
         language.effective(),
     );
     let (mut menu, mut menu_state) = build_menu(
@@ -193,6 +202,7 @@ pub fn run_tray() -> Result<(), String> {
                             &personal,
                             model::unix_timestamp(),
                             show_distant_reminders,
+                            reminders_expanded,
                             effective,
                         );
                         apply_snapshot(
@@ -229,6 +239,7 @@ pub fn run_tray() -> Result<(), String> {
                             &personal,
                             model::unix_timestamp(),
                             show_distant_reminders,
+                            reminders_expanded,
                             language.effective(),
                         );
                         rebuild_menu(
@@ -257,7 +268,7 @@ pub fn run_tray() -> Result<(), String> {
                 #[cfg(target_os = "windows")]
                 if let Some(hud) = hud.as_ref() {
                     if let Some(event) =
-                        show_hud_menu(&menu, hud, reminder_id, language.effective())
+                        show_hud_menu(&menu, hud, &personal, reminder_id, language.effective())
                     {
                         let _ = menu_proxy.send_event(UserEvent::Menu(event));
                     }
@@ -278,6 +289,7 @@ pub fn run_tray() -> Result<(), String> {
                             &personal,
                             now,
                             show_distant_reminders,
+                            reminders_expanded,
                             language.effective(),
                         );
                         rebuild_menu(
@@ -293,6 +305,17 @@ pub fn run_tray() -> Result<(), String> {
                         );
                     }
                 }
+            }
+            Event::UserEvent(UserEvent::ReminderExpansionToggled) => {
+                reminders_expanded = !reminders_expanded;
+                update_hud_personal(
+                    hud.as_ref(),
+                    &personal,
+                    model::unix_timestamp(),
+                    show_distant_reminders,
+                    reminders_expanded,
+                    language.effective(),
+                );
             }
             Event::UserEvent(UserEvent::RefreshStarted) => {
                 menu_state.refresh.set_enabled(false);
@@ -322,6 +345,7 @@ pub fn run_tray() -> Result<(), String> {
                     &personal,
                     now,
                     show_distant_reminders,
+                    reminders_expanded,
                     language.effective(),
                 );
                 next_personal_tick = Instant::now() + Duration::from_secs(1);
@@ -697,6 +721,8 @@ fn build_reminders_menu(
             .append(&empty)
             .map_err(|error| format!("could not build reminders menu: {error}"))?;
     } else {
+        let mut ordered = personal.reminders.iter().collect::<Vec<_>>();
+        ordered.sort_by_key(|reminder| reminder.next_at);
         let separator = PredefinedMenuItem::separator();
         let complete = Submenu::with_id(
             "personal.reminders.complete",
@@ -708,8 +734,6 @@ fn build_reminders_menu(
             i18n::text(language, key::DELETE_REMINDER),
             true,
         );
-        let mut ordered = personal.reminders.iter().collect::<Vec<_>>();
-        ordered.sort_by_key(|reminder| reminder.next_at);
         let complete_entries = ordered
             .iter()
             .map(|reminder| {
@@ -999,6 +1023,11 @@ fn handle_personal_menu_event(
                     .parse::<u64>()
                     .ok()
                     .is_some_and(|id| personal.remove_note(id))
+            } else if let Some(value) = id.strip_prefix("personal.reminder.anchor.") {
+                value
+                    .parse::<u64>()
+                    .ok()
+                    .is_some_and(|id| personal.toggle_interval_anchor_on_click(id))
             } else if let Some(value) = id.strip_prefix("personal.reminder.complete.") {
                 value
                     .parse::<u64>()
@@ -1152,10 +1181,12 @@ fn update_hud_personal(
     personal: &PersonalItems,
     now: i64,
     show_distant_reminders: bool,
+    reminders_expanded: bool,
     language: Language,
 ) {
     if let Some(hud) = hud {
-        let content = personal.hud_content(now, show_distant_reminders, language);
+        let content =
+            personal.hud_content(now, show_distant_reminders, reminders_expanded, language);
         hud.update_personal(&content.items, &content.clock);
     }
 }
@@ -1164,6 +1195,7 @@ fn update_hud_personal(
 fn show_hud_menu(
     menu: &Menu,
     hud: &Hud,
+    personal: &PersonalItems,
     reminder_id: Option<u64>,
     language: Language,
 ) -> Option<MenuEvent> {
@@ -1171,21 +1203,41 @@ fn show_hud_menu(
     use windows_sys::Win32::{
         Foundation::POINT,
         UI::WindowsAndMessaging::{
-            GetCursorPos, InsertMenuW, MF_BYPOSITION, MF_SEPARATOR, MF_STRING, PostMessageW,
-            RemoveMenu, SetForegroundWindow, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RETURNCMD,
-            TPM_RIGHTBUTTON, TrackPopupMenu, WM_NULL,
+            GetCursorPos, InsertMenuW, MF_BYPOSITION, MF_CHECKED, MF_SEPARATOR, MF_STRING,
+            PostMessageW, RemoveMenu, SetForegroundWindow, TPM_BOTTOMALIGN, TPM_LEFTALIGN,
+            TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_NULL,
         },
     };
 
     const COMPLETE_COMMAND: u32 = 0x7fff_ff01;
+    const ANCHOR_COMMAND: u32 = 0x7fff_ff02;
     let hwnd = hud.hwnd();
     let mut cursor = POINT::default();
     let handle = menu.hpopupmenu() as _;
     let mut inserted = 0;
+    let interval_anchor = reminder_id.and_then(|id| {
+        personal
+            .reminders
+            .iter()
+            .find(|reminder| reminder.id == id && reminder.is_interval())
+            .map(|reminder| reminder.update_interval_anchor_on_click)
+    });
     if reminder_id.is_some()
         && unsafe { InsertMenuW(handle, 0, MF_BYPOSITION | MF_SEPARATOR, 0, null()) } != 0
     {
-        inserted = 1;
+        inserted += 1;
+        if let Some(checked) = interval_anchor {
+            let label = i18n::text(language, key::UPDATE_INTERVAL_ANCHOR_ON_CLICK)
+                .encode_utf16()
+                .chain([0])
+                .collect::<Vec<_>>();
+            let flags = MF_BYPOSITION | MF_STRING | if checked { MF_CHECKED } else { 0 };
+            if unsafe { InsertMenuW(handle, 0, flags, ANCHOR_COMMAND as usize, label.as_ptr()) }
+                != 0
+            {
+                inserted += 1;
+            }
+        }
         let label = i18n::text(language, key::MARK_COMPLETE)
             .encode_utf16()
             .chain([0])
@@ -1200,7 +1252,7 @@ fn show_hud_menu(
             )
         } != 0
         {
-            inserted = 2;
+            inserted += 1;
         }
     }
     hud.set_context_menu_active(true);
@@ -1226,6 +1278,11 @@ fn show_hud_menu(
     if selected as u32 == COMPLETE_COMMAND {
         return reminder_id.map(|id| MenuEvent {
             id: MenuId::new(format!("personal.reminder.complete.{id}")),
+        });
+    }
+    if selected as u32 == ANCHOR_COMMAND {
+        return reminder_id.map(|id| MenuEvent {
+            id: MenuId::new(format!("personal.reminder.anchor.{id}")),
         });
     }
     (selected > 0)

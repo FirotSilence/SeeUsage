@@ -8,6 +8,7 @@ const MAX_NOTES: usize = 24;
 const MAX_REMINDERS: usize = 32;
 const MAX_NOTE_CHARS: usize = 80;
 const MAX_REMINDER_CHARS: usize = 60;
+const COLLAPSED_REMINDER_COUNT: usize = 2;
 const DISTANT_REMINDER_SECONDS: i64 = 2 * 24 * 60 * 60;
 const MIN_LUNAR_YEAR: i32 = 1901;
 const MAX_LUNAR_YEAR: i32 = 2100;
@@ -32,6 +33,8 @@ pub struct Reminder {
     pub text: String,
     pub next_at: i64,
     pub recurrence: Recurrence,
+    #[serde(default)]
+    pub update_interval_anchor_on_click: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -113,6 +116,8 @@ pub enum ReminderPreset {
 pub enum HudItemKind {
     Note,
     Reminder,
+    ReminderExpand,
+    ReminderCollapse,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -177,6 +182,7 @@ impl PersonalItems {
             text,
             next_at,
             recurrence,
+            update_interval_anchor_on_click: false,
         });
         Ok(())
     }
@@ -203,10 +209,23 @@ impl PersonalItems {
         self.complete_at(index, now)
     }
 
+    pub fn toggle_interval_anchor_on_click(&mut self, id: u64) -> bool {
+        let Some(reminder) = self
+            .reminders
+            .iter_mut()
+            .find(|reminder| reminder.id == id && reminder.is_interval())
+        else {
+            return false;
+        };
+        reminder.update_interval_anchor_on_click = !reminder.update_interval_anchor_on_click;
+        true
+    }
+
     pub fn hud_content(
         &self,
         now: i64,
         show_distant_reminders: bool,
+        reminders_expanded: bool,
         language: Language,
     ) -> HudContent {
         let clock = local_time(now).format("%H:%M").to_string();
@@ -230,7 +249,17 @@ impl PersonalItems {
             (urgency, reminder.next_at)
         });
 
-        let mut items = Vec::with_capacity(self.reminders.len() + self.notes.len());
+        let reminder_count = reminders.len();
+        let visible_reminder_count = if reminders_expanded {
+            reminder_count
+        } else {
+            reminder_count.min(COLLAPSED_REMINDER_COUNT)
+        };
+        let mut items = Vec::with_capacity(
+            self.notes.len()
+                + visible_reminder_count
+                + usize::from(reminder_count > COLLAPSED_REMINDER_COUNT),
+        );
         items.extend(self.notes.iter().map(|note| HudItem {
             text: note.text.clone(),
             kind: HudItemKind::Note,
@@ -239,14 +268,33 @@ impl PersonalItems {
             flashing: false,
             reminder_id: None,
         }));
-        items.extend(reminders.into_iter().map(|reminder| HudItem {
-            text: reminder_hud_text(reminder, now, language),
-            kind: HudItemKind::Reminder,
-            urgent: reminder.next_at.saturating_sub(now) <= 5 * 60,
-            due: reminder.next_at <= now,
-            flashing: reminder.next_at <= now && now.rem_euclid(2) == 0,
-            reminder_id: Some(reminder.id),
-        }));
+        items.extend(
+            reminders
+                .iter()
+                .take(visible_reminder_count)
+                .map(|reminder| HudItem {
+                    text: reminder_hud_text(reminder, now, language),
+                    kind: HudItemKind::Reminder,
+                    urgent: reminder.next_at.saturating_sub(now) <= 5 * 60,
+                    due: reminder.next_at <= now,
+                    flashing: reminder.next_at <= now && now.rem_euclid(2) == 0,
+                    reminder_id: Some(reminder.id),
+                }),
+        );
+        if reminder_count > COLLAPSED_REMINDER_COUNT {
+            items.push(HudItem {
+                text: String::new(),
+                kind: if reminders_expanded {
+                    HudItemKind::ReminderCollapse
+                } else {
+                    HudItemKind::ReminderExpand
+                },
+                urgent: false,
+                due: false,
+                flashing: false,
+                reminder_id: None,
+            });
+        }
 
         HudContent { items, clock }
     }
@@ -279,13 +327,24 @@ impl PersonalItems {
     fn complete_at(&mut self, index: usize, now: i64) -> bool {
         let reminder = &self.reminders[index];
         let due = reminder.next_at;
-        let next_at = reminder.recurrence.next_after_due(now.max(due), due);
+        let next_at = match reminder.recurrence {
+            Recurrence::Interval { seconds } if reminder.update_interval_anchor_on_click => {
+                add_interval(now, seconds)
+            }
+            _ => reminder.recurrence.next_after_due(now.max(due), due),
+        };
         if let Some(next_at) = next_at {
             self.reminders[index].next_at = next_at;
         } else {
             self.reminders.remove(index);
         }
         true
+    }
+}
+
+impl Reminder {
+    pub fn is_interval(&self) -> bool {
+        matches!(self.recurrence, Recurrence::Interval { .. })
     }
 }
 
@@ -1159,12 +1218,22 @@ mod tests {
             .unwrap();
         let id = items.reminders[0].id;
         assert_eq!(items.reminders[0].next_at, 2_500);
-        assert!(!items.hud_content(2_499, false, Language::English).items[0].due);
+        assert!(
+            !items
+                .hud_content(2_499, false, false, Language::English)
+                .items[0]
+                .due
+        );
         assert!(!items.acknowledge_due(id, 2_499));
-        let due = items.hud_content(2_500, false, Language::English);
+        let due = items.hud_content(2_500, false, false, Language::English);
         assert!(due.items[0].due);
         assert!(due.items[0].flashing);
-        assert!(!items.hud_content(2_501, false, Language::English).items[0].flashing);
+        assert!(
+            !items
+                .hud_content(2_501, false, false, Language::English)
+                .items[0]
+                .flashing
+        );
         assert_eq!(items.reminders.len(), 1);
 
         assert!(items.acknowledge_due(id, 2_500));
@@ -1232,6 +1301,86 @@ mod tests {
     }
 
     #[test]
+    fn interval_anchor_configuration_is_per_reminder() {
+        let mut items = PersonalItems::default();
+        items
+            .add_reminder(
+                ReminderPreset::EveryMinutes,
+                "Posture",
+                "5",
+                1_000,
+                Language::English,
+            )
+            .unwrap();
+        items
+            .add_reminder(
+                ReminderPreset::EveryMinutes,
+                "Hydrate",
+                "5",
+                1_000,
+                Language::English,
+            )
+            .unwrap();
+        let click_anchored_id = items.reminders[0].id;
+        let fixed_anchored_id = items.reminders[1].id;
+
+        assert!(!items.reminders[0].update_interval_anchor_on_click);
+        assert!(!items.reminders[1].update_interval_anchor_on_click);
+        assert!(items.toggle_interval_anchor_on_click(click_anchored_id));
+        assert!(items.reminders[0].update_interval_anchor_on_click);
+        assert!(!items.reminders[1].update_interval_anchor_on_click);
+        assert!(items.acknowledge_due(click_anchored_id, 1_905));
+        assert!(items.acknowledge_due(fixed_anchored_id, 1_905));
+        assert_eq!(items.reminders[0].next_at, 2_205);
+        assert_eq!(items.reminders[1].next_at, 2_200);
+    }
+
+    #[test]
+    fn existing_interval_reminders_keep_the_fixed_anchor_default() {
+        let reminder: Reminder = serde_json::from_str(
+            r#"{"id":1,"text":"Posture","next_at":1300,"recurrence":{"kind":"interval","seconds":300}}"#,
+        )
+        .unwrap();
+
+        assert!(reminder.is_interval());
+        assert!(!reminder.update_interval_anchor_on_click);
+    }
+
+    #[test]
+    fn fixed_time_reminders_ignore_interval_anchor_updates() {
+        let now = Local::now().timestamp();
+        let reminder = Reminder {
+            id: 1,
+            text: "Daily review".into(),
+            next_at: now - 60,
+            recurrence: Recurrence::Daily {
+                hour: 10,
+                minute: 30,
+            },
+            update_interval_anchor_on_click: false,
+        };
+        let mut fixed_anchor = PersonalItems {
+            reminders: vec![reminder.clone()],
+            ..PersonalItems::default()
+        };
+        let mut click_anchor = PersonalItems {
+            reminders: vec![Reminder {
+                update_interval_anchor_on_click: true,
+                ..reminder
+            }],
+            ..PersonalItems::default()
+        };
+
+        assert!(!fixed_anchor.toggle_interval_anchor_on_click(1));
+        assert!(fixed_anchor.acknowledge_due(1, now));
+        assert!(click_anchor.acknowledge_due(1, now));
+        assert_eq!(
+            fixed_anchor.reminders[0].next_at,
+            click_anchor.reminders[0].next_at
+        );
+    }
+
+    #[test]
     fn selected_weekdays_accept_lists_and_ranges() {
         let (days, hour, minute) =
             parse_weekdays_and_time("Mon,Wed,Fri-Sun 18:30", Language::English).unwrap();
@@ -1281,6 +1430,7 @@ mod tests {
                     hour: 10,
                     minute: 30,
                 },
+                update_interval_anchor_on_click: false,
             }],
             ..PersonalItems::default()
         };
@@ -1447,10 +1597,11 @@ mod tests {
                 text: "Focus ends".into(),
                 next_at: now + 4 * 60,
                 recurrence: Recurrence::Once,
+                update_interval_anchor_on_click: false,
             }],
             ..PersonalItems::default()
         };
-        let content = items.hud_content(now, false, Language::English);
+        let content = items.hud_content(now, false, false, Language::English);
         assert_eq!(content.items[0].text, "Ordinary note");
         assert!(content.items[1].text.starts_with("Focus ends"));
         assert!(content.items[1].urgent);
@@ -1470,29 +1621,69 @@ mod tests {
                     text: "Later".into(),
                     next_at: now + 3_600,
                     recurrence: Recurrence::Once,
+                    update_interval_anchor_on_click: false,
                 },
                 Reminder {
                     id: 3,
                     text: "Overdue".into(),
                     next_at: now - 60,
                     recurrence: Recurrence::Once,
+                    update_interval_anchor_on_click: false,
                 },
                 Reminder {
                     id: 4,
                     text: "Soon".into(),
                     next_at: now + 60,
                     recurrence: Recurrence::Once,
+                    update_interval_anchor_on_click: false,
                 },
             ],
             ..PersonalItems::default()
         };
 
-        let content = items.hud_content(now, false, Language::English);
+        let content = items.hud_content(now, false, true, Language::English);
         assert_eq!(content.items[0].text, "Pinned note");
         assert!(content.items[1].text.starts_with("Overdue"));
         assert!(content.items[1].due);
         assert!(content.items[2].text.starts_with("Soon"));
         assert!(content.items[3].text.starts_with("Later"));
+    }
+
+    #[test]
+    fn reminders_are_collapsed_to_two_by_default() {
+        let now = 10_000;
+        let items = PersonalItems {
+            notes: vec![QuickNote {
+                id: 1,
+                text: "Pinned note".into(),
+            }],
+            reminders: (0..4)
+                .map(|index| Reminder {
+                    id: index + 2,
+                    text: format!("Reminder {}", index + 1),
+                    next_at: now + (index as i64 + 1) * 60,
+                    recurrence: Recurrence::Once,
+                    update_interval_anchor_on_click: false,
+                })
+                .collect(),
+            ..PersonalItems::default()
+        };
+
+        let collapsed = items.hud_content(now, false, false, Language::English);
+        assert_eq!(collapsed.items.len(), 4);
+        assert_eq!(collapsed.items[0].kind, HudItemKind::Note);
+        assert!(collapsed.items[1].text.starts_with("Reminder 1"));
+        assert!(collapsed.items[2].text.starts_with("Reminder 2"));
+        assert_eq!(collapsed.items[3].kind, HudItemKind::ReminderExpand);
+        assert!(collapsed.items[3].text.is_empty());
+        assert_eq!(collapsed.items[3].reminder_id, None);
+
+        let expanded = items.hud_content(now, false, true, Language::English);
+        assert_eq!(expanded.items.len(), 6);
+        assert!(expanded.items[4].text.starts_with("Reminder 4"));
+        assert_eq!(expanded.items[5].kind, HudItemKind::ReminderCollapse);
+        assert!(expanded.items[5].text.is_empty());
+        assert_eq!(expanded.items[5].reminder_id, None);
     }
 
     #[test]
@@ -1514,11 +1705,12 @@ mod tests {
                 text: "Stand up".into(),
                 next_at: now + 10 * 60,
                 recurrence: Recurrence::Once,
+                update_interval_anchor_on_click: false,
             }],
             ..PersonalItems::default()
         };
 
-        let content = items.hud_content(now, false, Language::English);
+        let content = items.hud_content(now, false, false, Language::English);
         assert_eq!(content.items.len(), 3);
         assert_eq!(content.items[0].text, "First note");
         assert_eq!(content.items[1].text, "Second note");
@@ -1539,23 +1731,25 @@ mod tests {
                     text: "At threshold".into(),
                     next_at: now + DISTANT_REMINDER_SECONDS,
                     recurrence: Recurrence::Once,
+                    update_interval_anchor_on_click: false,
                 },
                 Reminder {
                     id: 3,
                     text: "Beyond threshold".into(),
                     next_at: now + DISTANT_REMINDER_SECONDS + 1,
                     recurrence: Recurrence::Once,
+                    update_interval_anchor_on_click: false,
                 },
             ],
             ..PersonalItems::default()
         };
 
-        let filtered = items.hud_content(now, false, Language::English);
+        let filtered = items.hud_content(now, false, false, Language::English);
         assert_eq!(filtered.items.len(), 2);
         assert_eq!(filtered.items[0].text, "Visible note");
         assert!(filtered.items[1].text.starts_with("At threshold"));
 
-        let all = items.hud_content(now, true, Language::English);
+        let all = items.hud_content(now, true, false, Language::English);
         assert_eq!(all.items.len(), 3);
         assert!(
             all.items

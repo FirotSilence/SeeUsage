@@ -35,7 +35,7 @@ impl Default for Settings {
             personal: PersonalItems::default(),
             show_distant_reminders: false,
             show_codex: true,
-            show_minimax: true,
+            show_minimax: false,
             language: Language::default(),
         }
     }
@@ -245,10 +245,10 @@ mod tests {
     }
 
     #[test]
-    fn provider_visibility_defaults_on_and_round_trips_independently() {
+    fn provider_visibility_defaults_and_round_trips_independently() {
         let existing: Settings = serde_json::from_str("{}").unwrap();
         assert!(existing.show_codex);
-        assert!(existing.show_minimax);
+        assert!(!existing.show_minimax);
 
         let bytes = serde_json::to_vec(&Settings {
             show_codex: false,
