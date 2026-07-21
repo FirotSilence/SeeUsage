@@ -17,32 +17,45 @@ mod platform {
             MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, OUT_DEFAULT_PRECIS,
             UpdateWindow,
         },
-        System::{LibraryLoader::GetModuleHandleW, SystemServices::SS_SIMPLE},
+        System::{
+            LibraryLoader::GetModuleHandleW,
+            SystemServices::{SS_CENTERIMAGE, SS_RIGHT, SS_SIMPLE},
+        },
         UI::{
-            Controls::{EM_SETLIMITTEXT, EM_SETSEL},
+            Controls::{
+                EM_SETLIMITTEXT, EM_SETSEL, ICC_BAR_CLASSES, INITCOMMONCONTROLSEX,
+                InitCommonControlsEx, TBM_SETPOS, TBM_SETRANGE, TBS_NOTICKS,
+            },
             HiDpi::{AdjustWindowRectExForDpi, GetDpiForSystem},
             Input::KeyboardAndMouse::{SetActiveWindow, SetFocus},
             WindowsAndMessaging::{
                 BS_DEFPUSHBUTTON, BS_PUSHBUTTON, BringWindowToTop, CREATESTRUCTW, CreateWindowExW,
                 DefWindowProcW, DestroyWindow, DispatchMessageW, ES_AUTOHSCROLL, GWLP_USERDATA,
                 GetClientRect, GetCursorPos, GetMessageW, GetWindowLongPtrW, GetWindowTextLengthW,
-                GetWindowTextW, IDC_ARROW, IDCANCEL, IDOK, IsDialogMessageW, IsWindow,
-                IsWindowVisible, LoadCursorW, MA_ACTIVATE, MB_ICONERROR, MB_OK, MB_SETFOREGROUND,
-                MB_TOPMOST, MSG, MessageBoxW, PostMessageW, RegisterClassW, SW_HIDE, SW_SHOW,
-                SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetWindowLongPtrW,
-                SetWindowPos, ShowWindow, TranslateMessage, WM_CLOSE, WM_COMMAND, WM_CREATE,
-                WM_DPICHANGED, WM_MOUSEACTIVATE, WM_NCCREATE, WM_NCDESTROY, WM_NULL, WM_SETFONT,
+                GetWindowTextW, HWND_TOPMOST, IDC_ARROW, IDCANCEL, IDOK, IsDialogMessageW,
+                IsWindow, IsWindowVisible, LoadCursorW, MA_ACTIVATE, MB_ICONERROR, MB_OK,
+                MB_SETFOREGROUND, MB_TOPMOST, MSG, MessageBoxW, PostMessageW, RegisterClassW,
+                SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+                SendMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, SetWindowTextW,
+                ShowWindow, TranslateMessage, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DPICHANGED,
+                WM_HSCROLL, WM_MOUSEACTIVATE, WM_NCCREATE, WM_NCDESTROY, WM_NULL, WM_SETFONT,
                 WM_SIZE, WNDCLASSW, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_EX_CLIENTEDGE,
-                WS_EX_CONTROLPARENT, WS_EX_DLGMODALFRAME, WS_EX_TOOLWINDOW, WS_SYSMENU, WS_TABSTOP,
-                WS_VISIBLE,
+                WS_EX_CONTROLPARENT, WS_EX_DLGMODALFRAME, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+                WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
             },
         },
     };
 
     const CLASS_NAME: &str = "SeeUsage.InputDialog";
+    const GLASS_CLASS_NAME: &str = "SeeUsage.GlassSettingsDialog";
     const CLIENT_WIDTH_DIP: i32 = 440;
     const CLIENT_HEIGHT_DIP: i32 = 174;
     const DUAL_CLIENT_HEIGHT_DIP: i32 = 246;
+    const GLASS_CLIENT_WIDTH_DIP: i32 = 520;
+    const GLASS_CLIENT_HEIGHT_DIP: i32 = 380;
+    const GLASS_PARAMETER_COUNT: usize = 6;
+    const GLASS_RESET_ID: i32 = 1100;
+    const TBM_GETPOS: u32 = 1024;
 
     struct SecondaryInput {
         prompt: String,
@@ -68,6 +81,24 @@ mod platform {
         result: Option<(String, Option<String>)>,
     }
 
+    struct GlassDialogState {
+        current: settings::GlassSettings,
+        names: [String; GLASS_PARAMETER_COUNT],
+        reset_text: String,
+        cancel_text: String,
+        save_text: String,
+        name_labels: [HWND; GLASS_PARAMETER_COUNT],
+        sliders: [HWND; GLASS_PARAMETER_COUNT],
+        value_labels: [HWND; GLASS_PARAMETER_COUNT],
+        reset: HWND,
+        cancel: HWND,
+        save: HWND,
+        font: HFONT,
+        done: bool,
+        preview_changed: bool,
+        result: Option<settings::GlassSettings>,
+    }
+
     #[derive(Clone, Copy)]
     struct DialogLayout {
         label: RECT,
@@ -76,6 +107,20 @@ mod platform {
         secondary_edit: Option<RECT>,
         cancel: RECT,
         confirm: RECT,
+    }
+
+    #[derive(Clone, Copy)]
+    struct GlassRowLayout {
+        name: RECT,
+        slider: RECT,
+        value: RECT,
+    }
+
+    struct GlassDialogLayout {
+        rows: [GlassRowLayout; GLASS_PARAMETER_COUNT],
+        reset: RECT,
+        cancel: RECT,
+        save: RECT,
     }
 
     pub fn prompt_text(
@@ -105,6 +150,127 @@ mod platform {
             Some((schedule_prompt, schedule_default, schedule_max_chars)),
         )?;
         Some((text, schedule?))
+    }
+
+    pub fn prompt_glass_settings(
+        original: settings::GlassSettings,
+        owner: isize,
+        mut preview: impl FnMut(settings::GlassSettings),
+    ) -> Option<settings::GlassSettings> {
+        if !register_glass_class() {
+            show_error("Could not open the liquid glass settings window.");
+            return None;
+        }
+
+        let original = original.sanitized();
+        let instance = unsafe { GetModuleHandleW(null()) };
+        if instance.is_null() {
+            return None;
+        }
+        let dpi = unsafe { GetDpiForSystem() }.max(96);
+        let style = WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
+        let extended_style = glass_dialog_extended_style();
+        let mut outer = RECT {
+            left: 0,
+            top: 0,
+            right: dip(GLASS_CLIENT_WIDTH_DIP, dpi),
+            bottom: dip(GLASS_CLIENT_HEIGHT_DIP, dpi),
+        };
+        unsafe { AdjustWindowRectExForDpi(&mut outer, style, 0, extended_style, dpi) };
+        let width = outer.right - outer.left;
+        let height = outer.bottom - outer.top;
+        let (x, y) = centered_position(width, height);
+        let language = settings::language().effective();
+
+        let mut state = Box::new(GlassDialogState {
+            current: original,
+            names: [
+                i18n::text(language, key::GLASS_OPACITY).into(),
+                i18n::text(language, key::GLASS_BLUR).into(),
+                i18n::text(language, key::GLASS_TINT).into(),
+                i18n::text(language, key::GLASS_REFRACTION).into(),
+                i18n::text(language, key::GLASS_HIGHLIGHT).into(),
+                i18n::text(language, key::GLASS_MOTION).into(),
+            ],
+            reset_text: i18n::text(language, key::RESET_DEFAULTS).into(),
+            cancel_text: i18n::text(language, key::CANCEL).into(),
+            save_text: i18n::text(language, key::SAVE).into(),
+            name_labels: [null_mut(); GLASS_PARAMETER_COUNT],
+            sliders: [null_mut(); GLASS_PARAMETER_COUNT],
+            value_labels: [null_mut(); GLASS_PARAMETER_COUNT],
+            reset: null_mut(),
+            cancel: null_mut(),
+            save: null_mut(),
+            font: null_mut(),
+            done: false,
+            preview_changed: false,
+            result: None,
+        });
+        let hwnd = unsafe {
+            CreateWindowExW(
+                extended_style,
+                wide(GLASS_CLASS_NAME).as_ptr(),
+                wide(i18n::text(language, key::LIQUID_GLASS)).as_ptr(),
+                style,
+                x,
+                y,
+                width,
+                height,
+                owner as HWND,
+                null_mut(),
+                instance,
+                (&mut *state as *mut GlassDialogState).cast(),
+            )
+        };
+        if hwnd.is_null() {
+            return None;
+        }
+
+        unsafe {
+            resize_glass_dialog(hwnd, None);
+            ShowWindow(hwnd, SW_SHOW);
+            UpdateWindow(hwnd);
+            SetWindowPos(
+                hwnd,
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
+            );
+            BringWindowToTop(hwnd);
+            SetForegroundWindow(hwnd);
+            SetActiveWindow(hwnd);
+            if !state.sliders[0].is_null() {
+                SetFocus(state.sliders[0]);
+            }
+        }
+
+        let mut message = MSG::default();
+        loop {
+            if state.done {
+                break;
+            }
+            let result = unsafe { GetMessageW(&mut message, null_mut(), 0, 0) };
+            if result <= 0 {
+                break;
+            }
+            if unsafe { IsDialogMessageW(hwnd, &message) } == 0 {
+                unsafe {
+                    TranslateMessage(&message);
+                    DispatchMessageW(&message);
+                }
+            }
+            if state.preview_changed {
+                state.preview_changed = false;
+                preview(state.current);
+            }
+        }
+        if unsafe { IsWindow(hwnd) } != 0 {
+            unsafe { DestroyWindow(hwnd) };
+        }
+        state.result.take()
     }
 
     fn prompt_fields(
@@ -341,6 +507,404 @@ mod platform {
             };
             (unsafe { RegisterClassW(&class) } != 0) || unsafe { GetLastError() } == 1410
         })
+    }
+
+    unsafe extern "system" fn glass_window_proc(
+        hwnd: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        match message {
+            WM_NCCREATE => {
+                let create = lparam as *const CREATESTRUCTW;
+                if !create.is_null() {
+                    let state = unsafe { (*create).lpCreateParams as *mut GlassDialogState };
+                    unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, state as isize) };
+                }
+            }
+            WM_CREATE => {
+                if let Some(state) = glass_window_state(hwnd) {
+                    create_glass_controls(hwnd, state);
+                    layout_glass_controls(hwnd, state);
+                    return 0;
+                }
+            }
+            WM_SIZE => {
+                if let Some(state) = glass_window_state(hwnd) {
+                    layout_glass_controls(hwnd, state);
+                }
+                return 0;
+            }
+            WM_DPICHANGED => {
+                let recommended = lparam as *const RECT;
+                let position = unsafe { recommended.as_ref() }.map(|rect| (rect.left, rect.top));
+                resize_glass_dialog(hwnd, position);
+                if let Some(state) = glass_window_state(hwnd) {
+                    apply_glass_font(hwnd, state);
+                    layout_glass_controls(hwnd, state);
+                }
+                return 0;
+            }
+            WM_MOUSEACTIVATE => return MA_ACTIVATE as LRESULT,
+            WM_HSCROLL => {
+                if let Some(state) = glass_window_state(hwnd) {
+                    let slider = lparam as HWND;
+                    if let Some(index) = state
+                        .sliders
+                        .iter()
+                        .position(|candidate| *candidate == slider)
+                    {
+                        let value =
+                            unsafe { SendMessageW(slider, TBM_GETPOS, 0, 0) }.clamp(0, 100) as u8;
+                        let updated = with_glass_value(state.current, index, value);
+                        update_glass_value_label(state, index, value);
+                        if updated != state.current {
+                            state.current = updated;
+                            state.preview_changed = true;
+                        }
+                    }
+                }
+                return 0;
+            }
+            WM_COMMAND => {
+                let id = (wparam & 0xffff) as i32;
+                if let Some(state) = glass_window_state(hwnd) {
+                    if id == GLASS_RESET_ID {
+                        let defaults = settings::GlassSettings::default();
+                        if state.current != defaults {
+                            state.current = defaults;
+                            set_glass_slider_values(state);
+                            state.preview_changed = true;
+                        }
+                        return 0;
+                    }
+                    if id == IDOK || id == IDCANCEL {
+                        if id == IDOK {
+                            state.result = Some(state.current);
+                        }
+                        state.done = true;
+                        unsafe {
+                            ShowWindow(hwnd, SW_HIDE);
+                            PostMessageW(hwnd, WM_NULL, 0, 0);
+                        }
+                        return 0;
+                    }
+                }
+            }
+            WM_CLOSE => {
+                if let Some(state) = glass_window_state(hwnd) {
+                    state.done = true;
+                }
+                unsafe {
+                    ShowWindow(hwnd, SW_HIDE);
+                    PostMessageW(hwnd, WM_NULL, 0, 0);
+                }
+                return 0;
+            }
+            WM_NCDESTROY => {
+                if let Some(state) = glass_window_state(hwnd) {
+                    state.done = true;
+                    state.sliders.fill(null_mut());
+                    if !state.font.is_null() {
+                        unsafe { DeleteObject(state.font) };
+                        state.font = null_mut();
+                    }
+                }
+                unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) };
+            }
+            _ => {}
+        }
+        unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+    }
+
+    fn register_glass_class() -> bool {
+        static REGISTERED: OnceLock<bool> = OnceLock::new();
+        *REGISTERED.get_or_init(|| {
+            let controls = INITCOMMONCONTROLSEX {
+                dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
+                dwICC: ICC_BAR_CLASSES,
+            };
+            if unsafe { InitCommonControlsEx(&controls) } == 0 {
+                return false;
+            }
+            let instance = unsafe { GetModuleHandleW(null()) };
+            let class_name = wide(GLASS_CLASS_NAME);
+            let class = WNDCLASSW {
+                lpfnWndProc: Some(glass_window_proc),
+                hInstance: instance,
+                hCursor: unsafe { LoadCursorW(null_mut(), IDC_ARROW) },
+                hbrBackground: (COLOR_WINDOW as usize + 1) as _,
+                lpszClassName: class_name.as_ptr(),
+                ..WNDCLASSW::default()
+            };
+            (unsafe { RegisterClassW(&class) } != 0) || unsafe { GetLastError() } == 1410
+        })
+    }
+
+    fn create_glass_controls(hwnd: HWND, state: &mut GlassDialogState) {
+        for index in 0..GLASS_PARAMETER_COUNT {
+            state.name_labels[index] = create_control(
+                hwnd,
+                "STATIC",
+                &state.names[index],
+                0,
+                WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
+                1200 + index as i32 * 3,
+            );
+            state.sliders[index] = create_control(
+                hwnd,
+                "msctls_trackbar32",
+                "",
+                0,
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_NOTICKS,
+                1201 + index as i32 * 3,
+            );
+            state.value_labels[index] = create_control(
+                hwnd,
+                "STATIC",
+                "",
+                0,
+                WS_CHILD | WS_VISIBLE | SS_RIGHT | SS_CENTERIMAGE,
+                1202 + index as i32 * 3,
+            );
+            unsafe {
+                SendMessageW(
+                    state.sliders[index],
+                    TBM_SETRANGE,
+                    1,
+                    (100u32 << 16) as LPARAM,
+                );
+            }
+        }
+        state.reset = create_control(
+            hwnd,
+            "BUTTON",
+            &state.reset_text,
+            0,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON as u32,
+            GLASS_RESET_ID,
+        );
+        state.cancel = create_control(
+            hwnd,
+            "BUTTON",
+            &state.cancel_text,
+            0,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON as u32,
+            IDCANCEL,
+        );
+        state.save = create_control(
+            hwnd,
+            "BUTTON",
+            &state.save_text,
+            0,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON as u32,
+            IDOK,
+        );
+        set_glass_slider_values(state);
+        apply_glass_font(hwnd, state);
+    }
+
+    fn set_glass_slider_values(state: &GlassDialogState) {
+        for (index, value) in glass_values(state.current).into_iter().enumerate() {
+            unsafe { SendMessageW(state.sliders[index], TBM_SETPOS, 1, value as LPARAM) };
+            update_glass_value_label(state, index, value);
+        }
+    }
+
+    fn update_glass_value_label(state: &GlassDialogState, index: usize, value: u8) {
+        let text = wide(&format!("{value}%"));
+        unsafe { SetWindowTextW(state.value_labels[index], text.as_ptr()) };
+    }
+
+    fn glass_values(settings: settings::GlassSettings) -> [u8; GLASS_PARAMETER_COUNT] {
+        [
+            settings.opacity,
+            settings.blur,
+            settings.tint,
+            settings.refraction,
+            settings.highlight,
+            settings.motion,
+        ]
+    }
+
+    fn with_glass_value(
+        mut settings: settings::GlassSettings,
+        index: usize,
+        value: u8,
+    ) -> settings::GlassSettings {
+        match index {
+            0 => settings.opacity = value,
+            1 => settings.blur = value,
+            2 => settings.tint = value,
+            3 => settings.refraction = value,
+            4 => settings.highlight = value,
+            5 => settings.motion = value,
+            _ => {}
+        }
+        settings
+    }
+
+    fn layout_glass_controls(hwnd: HWND, state: &GlassDialogState) {
+        let mut client = RECT::default();
+        unsafe { GetClientRect(hwnd, &mut client) };
+        let dpi = unsafe { windows_sys::Win32::UI::HiDpi::GetDpiForWindow(hwnd) }.max(96);
+        let layout = glass_dialog_layout(client.right, client.bottom, dpi);
+        for (index, row) in layout.rows.into_iter().enumerate() {
+            place_control(state.name_labels[index], row.name);
+            place_control(state.sliders[index], row.slider);
+            place_control(state.value_labels[index], row.value);
+        }
+        place_control(state.reset, layout.reset);
+        place_control(state.cancel, layout.cancel);
+        place_control(state.save, layout.save);
+    }
+
+    fn place_control(control: HWND, bounds: RECT) {
+        unsafe {
+            SetWindowPos(
+                control,
+                null_mut(),
+                bounds.left,
+                bounds.top,
+                bounds.right - bounds.left,
+                bounds.bottom - bounds.top,
+                SWP_NOACTIVATE | SWP_NOZORDER,
+            );
+        }
+    }
+
+    fn glass_dialog_layout(client_width: i32, client_height: i32, dpi: u32) -> GlassDialogLayout {
+        let margin = dip(20, dpi);
+        let name_width = dip(164, dpi);
+        let value_width = dip(50, dpi);
+        let horizontal_gap = dip(8, dpi);
+        let row_top = dip(18, dpi);
+        let row_step = dip(46, dpi);
+        let row_height = dip(34, dpi);
+        let rows = std::array::from_fn(|index| {
+            let top = row_top + index as i32 * row_step;
+            let name = RECT {
+                left: margin,
+                top,
+                right: margin + name_width,
+                bottom: top + row_height,
+            };
+            let value = RECT {
+                left: client_width - margin - value_width,
+                top,
+                right: client_width - margin,
+                bottom: top + row_height,
+            };
+            GlassRowLayout {
+                name,
+                slider: RECT {
+                    left: name.right + horizontal_gap,
+                    top,
+                    right: value.left - horizontal_gap,
+                    bottom: top + row_height,
+                },
+                value,
+            }
+        });
+        let button_height = dip(34, dpi);
+        let button_top = client_height - margin - button_height;
+        let save_width = dip(88, dpi);
+        let cancel_width = dip(84, dpi);
+        let reset_width = dip(140, dpi);
+        let save = RECT {
+            left: client_width - margin - save_width,
+            top: button_top,
+            right: client_width - margin,
+            bottom: button_top + button_height,
+        };
+        GlassDialogLayout {
+            rows,
+            reset: RECT {
+                left: margin,
+                top: button_top,
+                right: margin + reset_width,
+                bottom: button_top + button_height,
+            },
+            cancel: RECT {
+                left: save.left - horizontal_gap - cancel_width,
+                top: button_top,
+                right: save.left - horizontal_gap,
+                bottom: button_top + button_height,
+            },
+            save,
+        }
+    }
+
+    fn resize_glass_dialog(hwnd: HWND, position: Option<(i32, i32)>) {
+        let dpi = unsafe { windows_sys::Win32::UI::HiDpi::GetDpiForWindow(hwnd) }.max(96);
+        let style = WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
+        let extended_style = glass_dialog_extended_style();
+        let mut outer = RECT {
+            left: 0,
+            top: 0,
+            right: dip(GLASS_CLIENT_WIDTH_DIP, dpi),
+            bottom: dip(GLASS_CLIENT_HEIGHT_DIP, dpi),
+        };
+        unsafe { AdjustWindowRectExForDpi(&mut outer, style, 0, extended_style, dpi) };
+        let width = outer.right - outer.left;
+        let height = outer.bottom - outer.top;
+        let (x, y) = position.unwrap_or_else(|| centered_position(width, height));
+        unsafe {
+            SetWindowPos(
+                hwnd,
+                null_mut(),
+                x,
+                y,
+                width,
+                height,
+                SWP_NOACTIVATE | SWP_NOZORDER,
+            );
+        }
+    }
+
+    fn glass_dialog_extended_style() -> u32 {
+        WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT | WS_EX_TOOLWINDOW | WS_EX_TOPMOST
+    }
+
+    fn apply_glass_font(hwnd: HWND, state: &mut GlassDialogState) {
+        let dpi = unsafe { windows_sys::Win32::UI::HiDpi::GetDpiForWindow(hwnd) }.max(96);
+        let face = wide("Segoe UI");
+        let font = unsafe {
+            CreateFontW(
+                -dip(10, dpi),
+                0,
+                0,
+                0,
+                400,
+                0,
+                0,
+                0,
+                DEFAULT_CHARSET as u32,
+                OUT_DEFAULT_PRECIS as u32,
+                CLIP_DEFAULT_PRECIS as u32,
+                CLEARTYPE_QUALITY as u32,
+                (DEFAULT_PITCH | FF_DONTCARE) as u32,
+                face.as_ptr(),
+            )
+        };
+        if font.is_null() {
+            return;
+        }
+        for control in state
+            .name_labels
+            .iter()
+            .chain(state.sliders.iter())
+            .chain(state.value_labels.iter())
+            .copied()
+            .chain([state.reset, state.cancel, state.save])
+        {
+            unsafe { SendMessageW(control, WM_SETFONT, font as usize, 1) };
+        }
+        if !state.font.is_null() {
+            unsafe { DeleteObject(state.font) };
+        }
+        state.font = font;
     }
 
     fn create_controls(hwnd: HWND, state: &mut InputState) {
@@ -627,6 +1191,11 @@ mod platform {
         unsafe { pointer.as_mut() }
     }
 
+    fn glass_window_state(hwnd: HWND) -> Option<&'static mut GlassDialogState> {
+        let pointer = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut GlassDialogState;
+        unsafe { pointer.as_mut() }
+    }
+
     fn dip(value: i32, dpi: u32) -> i32 {
         (value * dpi as i32 + 48) / 96
     }
@@ -678,6 +1247,52 @@ mod platform {
             }
             assert!(layout.edit.bottom < secondary_label.top);
             assert!(secondary_edit.bottom < layout.confirm.top);
+        }
+
+        #[test]
+        fn glass_controls_fit_and_keep_clear_button_space_at_every_common_dpi() {
+            for dpi in [96, 144, 192] {
+                let width = dip(GLASS_CLIENT_WIDTH_DIP, dpi);
+                let height = dip(GLASS_CLIENT_HEIGHT_DIP, dpi);
+                let layout = glass_dialog_layout(width, height, dpi);
+                for row in layout.rows {
+                    for bounds in [row.name, row.slider, row.value] {
+                        assert!(bounds.left >= 0);
+                        assert!(bounds.top >= 0);
+                        assert!(bounds.right <= width);
+                        assert!(bounds.bottom <= height);
+                    }
+                    assert!(row.name.right < row.slider.left);
+                    assert!(row.slider.right < row.value.left);
+                    assert!(row.slider.right > row.slider.left);
+                }
+                for bounds in [layout.reset, layout.cancel, layout.save] {
+                    assert!(bounds.left >= 0);
+                    assert!(bounds.top >= 0);
+                    assert!(bounds.right <= width);
+                    assert!(bounds.bottom <= height);
+                }
+                assert!(layout.rows[GLASS_PARAMETER_COUNT - 1].slider.bottom < layout.save.top);
+                assert!(layout.reset.right < layout.cancel.left);
+                assert!(layout.cancel.right < layout.save.left);
+            }
+        }
+
+        #[test]
+        fn glass_parameter_mapping_updates_only_the_selected_control() {
+            let original = settings::GlassSettings::default();
+            let updated = with_glass_value(original, 3, 91);
+            assert_eq!(updated.refraction, 91);
+            assert_eq!(updated.opacity, original.opacity);
+            assert_eq!(updated.blur, original.blur);
+            assert_eq!(updated.tint, original.tint);
+            assert_eq!(updated.highlight, original.highlight);
+            assert_eq!(updated.motion, original.motion);
+        }
+
+        #[test]
+        fn glass_settings_window_stays_above_the_no_activate_hud() {
+            assert_ne!(glass_dialog_extended_style() & WS_EX_TOPMOST, 0);
         }
     }
 }
@@ -745,6 +1360,14 @@ end run"#;
         Some((text, schedule))
     }
 
+    pub fn prompt_glass_settings(
+        _: settings::GlassSettings,
+        _: isize,
+        _: impl FnMut(settings::GlassSettings),
+    ) -> Option<settings::GlassSettings> {
+        None
+    }
+
     pub fn show_error(message: &str) {
         const SCRIPT: &str = r#"on run argv
 set okLabel to item 2 of argv
@@ -759,6 +1382,8 @@ end run"#;
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 mod platform {
+    use crate::settings::GlassSettings;
+
     pub fn prompt_text(_: &str, _: &str, _: &str, _: usize) -> Option<String> {
         None
     }
@@ -776,9 +1401,17 @@ mod platform {
         None
     }
 
+    pub fn prompt_glass_settings(
+        _: GlassSettings,
+        _: isize,
+        _: impl FnMut(GlassSettings),
+    ) -> Option<GlassSettings> {
+        None
+    }
+
     pub fn show_error(message: &str) {
         eprintln!("SeeUsage: {message}");
     }
 }
 
-pub use platform::{prompt_reminder, prompt_text, show_error};
+pub use platform::{prompt_glass_settings, prompt_reminder, prompt_text, show_error};

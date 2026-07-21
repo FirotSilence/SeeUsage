@@ -64,6 +64,8 @@ struct MenuState {
     #[cfg(target_os = "windows")]
     reset_meter_id: MenuId,
     #[cfg(target_os = "windows")]
+    glass_settings_id: MenuId,
+    #[cfg(target_os = "windows")]
     pin_meter_id: MenuId,
     refresh_id: MenuId,
     autostart_id: MenuId,
@@ -403,6 +405,13 @@ fn build_menu(
         None,
     );
     #[cfg(target_os = "windows")]
+    let glass_settings = MenuItem::with_id(
+        "action.meter.glass",
+        i18n::text(language, key::LIQUID_GLASS),
+        hud_available,
+        None,
+    );
+    #[cfg(target_os = "windows")]
     let pin_meter_saved = settings::hud_pinned();
     #[cfg(target_os = "windows")]
     let pin_meter = CheckMenuItem::with_id(
@@ -464,6 +473,12 @@ fn build_menu(
     let personal_separator = PredefinedMenuItem::separator();
     #[cfg(target_os = "windows")]
     let meter_separator = PredefinedMenuItem::separator();
+    #[cfg(target_os = "windows")]
+    let hud_menu = Submenu::with_id("action.hud", "HUD", hud_available);
+    #[cfg(target_os = "windows")]
+    hud_menu
+        .append_items(&[&meter, &pin_meter, &glass_settings, &reset_meter])
+        .map_err(|error| format!("could not build HUD menu: {error}"))?;
     let separator_two = PredefinedMenuItem::separator();
 
     if provider_visibility.codex {
@@ -479,7 +494,7 @@ fn build_menu(
     menu.append_items(&[&notes, &reminders, &personal_separator])
         .map_err(|error| format!("could not build tray menu: {error}"))?;
     #[cfg(target_os = "windows")]
-    menu.append_items(&[&meter, &pin_meter, &reset_meter, &meter_separator])
+    menu.append_items(&[&hud_menu, &meter_separator])
         .map_err(|error| format!("could not build tray menu: {error}"))?;
     #[cfg(not(target_os = "windows"))]
     let _ = (hud_available, hud_visible);
@@ -499,6 +514,8 @@ fn build_menu(
         meter_id: meter.id().clone(),
         #[cfg(target_os = "windows")]
         reset_meter_id: reset_meter.id().clone(),
+        #[cfg(target_os = "windows")]
+        glass_settings_id: glass_settings.id().clone(),
         #[cfg(target_os = "windows")]
         pin_meter_id: pin_meter.id().clone(),
         refresh_id: refresh.id().clone(),
@@ -918,6 +935,25 @@ fn handle_menu_event(
     if event.id == menu.reset_meter_id {
         if let Some(hud) = hud {
             hud.reset_position();
+        }
+        return false;
+    }
+    #[cfg(target_os = "windows")]
+    if event.id == menu.glass_settings_id {
+        if let Some(hud) = hud {
+            let original = settings::glass_settings();
+            let updated = platform_ui::prompt_glass_settings(original, hud.hwnd(), |glass| {
+                hud.set_glass_settings(glass);
+            });
+            match updated {
+                Some(glass) => {
+                    if let Err(error) = settings::set_glass_settings(glass) {
+                        hud.set_glass_settings(original);
+                        menu.updated.set_text(error);
+                    }
+                }
+                None => hud.set_glass_settings(original),
+            }
         }
         return false;
     }
@@ -1379,5 +1415,56 @@ mod tests {
         assert!(!resolve_check_toggle(true, true));
         assert!(resolve_check_toggle(false, true));
         assert!(!resolve_check_toggle(true, false));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn hud_context_menu_exposes_the_localized_glass_settings_command() {
+        let (menu, state) = build_menu(
+            &AppSnapshot::default(),
+            &PersonalItems::default(),
+            false,
+            true,
+            true,
+            false,
+            Language::SimplifiedChinese,
+            ProviderVisibility {
+                codex: true,
+                minimax: false,
+            },
+        )
+        .unwrap();
+        let hud_menu = menu
+            .items()
+            .into_iter()
+            .find_map(|item| (item.id() == "action.hud").then(|| item.as_submenu().cloned()))
+            .flatten()
+            .expect("HUD submenu");
+        let glass = hud_menu
+            .items()
+            .into_iter()
+            .find(|item| item.id() == "action.meter.glass")
+            .and_then(|item| item.as_menuitem().cloned())
+            .expect("liquid glass settings command");
+
+        assert_eq!(glass.id(), &state.glass_settings_id);
+        assert_eq!(glass.text(), "液态玻璃设置...");
+        assert!(glass.is_enabled());
+
+        let glass_index = hud_menu
+            .items()
+            .iter()
+            .position(|item| item.id() == "action.meter.glass")
+            .expect("native liquid glass item index");
+        let native_id = unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::GetMenuItemID(
+                hud_menu.hpopupmenu() as _,
+                glass_index as i32,
+            )
+        };
+        assert_eq!(
+            find_menu_id(menu.items(), menu.hpopupmenu(), native_id),
+            Some(state.glass_settings_id)
+        );
     }
 }

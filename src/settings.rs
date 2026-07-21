@@ -13,6 +13,43 @@ pub struct HudPosition {
     pub y: i32,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
+pub struct GlassSettings {
+    pub opacity: u8,
+    pub blur: u8,
+    pub tint: u8,
+    pub refraction: u8,
+    pub highlight: u8,
+    pub motion: u8,
+}
+
+impl Default for GlassSettings {
+    fn default() -> Self {
+        Self {
+            opacity: 80,
+            blur: 50,
+            tint: 50,
+            refraction: 50,
+            highlight: 50,
+            motion: 50,
+        }
+    }
+}
+
+impl GlassSettings {
+    pub fn sanitized(self) -> Self {
+        Self {
+            opacity: self.opacity.min(100),
+            blur: self.blur.min(100),
+            tint: self.tint.min(100),
+            refraction: self.refraction.min(100),
+            highlight: self.highlight.min(100),
+            motion: self.motion.min(100),
+        }
+    }
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(default)]
 struct Settings {
@@ -24,6 +61,7 @@ struct Settings {
     show_codex: bool,
     show_minimax: bool,
     language: Language,
+    glass: GlassSettings,
 }
 
 impl Default for Settings {
@@ -37,6 +75,7 @@ impl Default for Settings {
             show_codex: true,
             show_minimax: false,
             language: Language::default(),
+            glass: GlassSettings::default(),
         }
     }
 }
@@ -140,6 +179,17 @@ pub fn set_language(language: Language) -> Result<(), String> {
     update(|settings| settings.language = language)
 }
 
+#[cfg(target_os = "windows")]
+pub fn glass_settings() -> GlassSettings {
+    let _guard = lock_settings();
+    load_unlocked().glass
+}
+
+#[cfg(target_os = "windows")]
+pub fn set_glass_settings(glass: GlassSettings) -> Result<(), String> {
+    update(|settings| settings.glass = glass.sanitized())
+}
+
 fn update(update: impl FnOnce(&mut Settings)) -> Result<(), String> {
     let _guard = lock_settings();
     let mut settings = load_unlocked();
@@ -151,6 +201,10 @@ fn load_unlocked() -> Settings {
     fs::read(settings_path())
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .map(|mut settings: Settings| {
+            settings.glass = settings.glass.sanitized();
+            settings
+        })
         .unwrap_or_default()
 }
 
@@ -273,5 +327,49 @@ mod tests {
         .unwrap();
         let decoded: Settings = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(decoded.language, Language::Japanese);
+    }
+
+    #[test]
+    fn legacy_settings_use_balanced_glass_defaults() {
+        let decoded: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(decoded.glass, GlassSettings::default());
+    }
+
+    #[test]
+    fn glass_settings_round_trip_independently() {
+        let glass = GlassSettings {
+            opacity: 62,
+            blur: 73,
+            tint: 38,
+            refraction: 84,
+            highlight: 91,
+            motion: 27,
+        };
+        let bytes = serde_json::to_vec(&Settings {
+            glass,
+            ..Settings::default()
+        })
+        .unwrap();
+        let decoded: Settings = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(decoded.glass, glass);
+    }
+
+    #[test]
+    fn glass_settings_are_limited_to_percentages() {
+        let glass = GlassSettings {
+            opacity: 255,
+            blur: 101,
+            tint: 100,
+            refraction: 99,
+            highlight: 128,
+            motion: 200,
+        }
+        .sanitized();
+        assert_eq!(glass.opacity, 100);
+        assert_eq!(glass.blur, 100);
+        assert_eq!(glass.tint, 100);
+        assert_eq!(glass.refraction, 99);
+        assert_eq!(glass.highlight, 100);
+        assert_eq!(glass.motion, 100);
     }
 }

@@ -29,6 +29,10 @@ and never sent to Codex or MiniMax. They use the same per-user data directory
 permissions as the usage cache, but are not separately encrypted; do not place
 passwords or API keys in them.
 
+The Windows liquid-glass effect samples the small desktop area directly behind
+the HUD. The backdrop buffer is memory-only and must never be logged,
+serialized, attached to diagnostics, or sent to either provider.
+
 CLI search paths are permission-filtered before they reach a provider process.
 The selected executable directory is included only after it is trusted or the
 user explicitly approves it. Non-interactive commands have no inherited
